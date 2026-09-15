@@ -70,8 +70,17 @@ for (const kind of ['run', 'send'] as const) test(`agent ${kind}: prepare → in
   assert.equal(remote.owner(remoteReg.lineageId).state, 'frozen'); assert.equal(existsSync(join(source.root, 'runs', returned.transferId)), false); assert.equal(existsSync(join(remote.transfer(returned.transferId), 'approval.json')), false);
   const reverseStatusBefore = readFileSync(join(source.transfer(returned.transferId), 'status.json')); const reverseObserved = await call(['status', returned.transferId, '--refresh']); assert.equal((reverseObserved.data as { observation: string }).observation, 'remote-durable'); assert.deepEqual(readFileSync(join(source.transfer(returned.transferId), 'status.json')), reverseStatusBefore);
   const captures = operations.filter(op => op === 'capture').length; const reverseManifest = readFileSync(join(source.transfer(returned.transferId), 'manifest.json'));
+  const rejectsReturnBuild = () => {
+    const beforeRoute = findReturn(source, returned.transferId); const beforeOwner = remote.owner(remoteReg.lineageId); const beforeStatus = readFileSync(join(source.transfer(returned.transferId), 'status.json'));
+    const value = incompatible(['recover', returned.transferId], 'RETURN_UNCERTAIN', 4);
+    assert.equal(value.data.originalId, prepared.transferId); assert.equal(value.data.reverseId, returned.transferId); assert.equal(value.data.cause.code, 'STREAM_CAPABILITY');
+    assert.deepEqual(findReturn(source, returned.transferId), beforeRoute); assert.deepEqual(remote.owner(remoteReg.lineageId), beforeOwner); assert.deepEqual(readFileSync(join(source.transfer(returned.transferId), 'status.json')), beforeStatus);
+    assert.deepEqual(readFileSync(join(source.transfer(returned.transferId), 'manifest.json')), reverseManifest); assert.equal(operations.filter(op => op === 'capture').length, captures);
+  };
+  rejectsReturnBuild(); // Prepared route: first remote request is the read-only status query.
   const repeated = (await call(['pull', prepared.transferId, '--prepare'])).data as Prepared; assert.equal(repeated.reverseId, returned.reverseId); assert.equal(operations.filter(op => op === 'capture').length, captures);
   await call(['inspect', returned.transferId]); await call(['approve', returned.transferId, '--approval-digest', returned.digest]);
+  rejectsReturnBuild(); // Approved route: first remote request records the exact remote approval.
   const rejectsPreparation = async () => { const before = operations.length; await assert.rejects(call(['pull', prepared.transferId, '--prepare']), (error: unknown) => { const e = error as { code: string; data: Record<string, unknown> }; assert.equal(e.code, 'PHASE_CONFLICT'); assert.equal(e.data.reverseId, returned.transferId); assert.equal(e.data.originalId, prepared.transferId); assert.equal('remoteFrozen' in e.data, false); return true; }); assert.equal(operations.length, before); };
   await rejectsPreparation();
   if (kind === 'send') { await assert.rejects(resumeReturn(source, findReturn(source, returned.transferId)!, rpc, async () => { assert.fail('Already approved'); }, point => { if (point === 'restoration') throw new Error('stop after restoration'); }), /stop after restoration/); assert.equal(source.status(returned.transferId).phase, 'ready'); await rejectsPreparation(); }

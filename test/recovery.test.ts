@@ -16,6 +16,7 @@ import { beginReturn, findReturn, resumeReturn, type ReturnBoundary } from '../s
 import { type Config } from '../src/schema.js';
 import { type Rpc } from '../src/transport.js';
 import { atomicWrite } from '../src/safe.js';
+import { CliError } from '../src/errors.js';
 
 async function sourceFixture() {
   const root = fixtureRoot(); const repo = fixtureRepo(root); const profile = fixtureProfile(root); const session = fixtureSession(repo, root); const store = new Store(join(root, 'state'));
@@ -154,6 +155,9 @@ for (const lost of ['capture', 'fence'] as const) test(`return recovery: lost ${
         assert.equal(observed.status, 0, observed.stderr); const data = JSON.parse(observed.stdout).data;
         assert.equal(data.observation, 'return-route'); assert.equal(data.reverseId, route.reverseId); assert.equal(data.phase, 'unknown');
         assert.equal(findReturn(f.store, route.reverseId)!.reverseDigest, null);
+      }
+      {
+        // Even after a lost fence ACK, the cached checkpoint cannot clear route uncertainty.
         const beforeRoute = findReturn(f.store, route.reverseId); const beforeOwner = f.remote.owner(f.captured.manifest.lineageId);
         const bin = join(f.root, 'bin'); mkdirSync(bin); const admission = join(f.root, 'incompatible-admission');
         writeFileSync(join(bin, 'ssh'), `#!/bin/sh\nexec '${process.execPath}' '${resolve('dist/test/stream-process.js')}' incompatible '${admission}'\n`, { mode: 0o700 });
@@ -186,6 +190,16 @@ for (const point of ['capture', 'restoration', 'fence', 'claim', 'registration',
   try {
     const route = beginReturn(f.store, f.captured.manifest.transferId, f.alias, f.destination); let once = true;
     await assert.rejects(resumeReturn(f.store, route, f.rpc, approve(f.store), reached => { if (reached === point && once) { once = false; throw new Error(`crash after ${point}`); } }), /crash after/);
+    if (point === 'capture') {
+      const beforeRoute = findReturn(f.store, route.reverseId); const beforeOwner = f.remote.owner(f.captured.manifest.lineageId); const calls: string[] = [];
+      const incompatible: Rpc = async request => { calls.push(request.operation); throw new CliError('STREAM_CAPABILITY', 'Incompatible helper', 'capability', 'Install Bauble 0.2.0 on both ends. No downgrade or replay.'); };
+      await assert.rejects(resumeReturn(f.store, route, incompatible, approve(f.store)), (error: unknown) => {
+        assert.ok(error instanceof CliError); assert.equal(error.code, 'RETURN_UNCERTAIN'); assert.equal(error.exitCode, 4);
+        const data = error.data as { originalId: string; reverseId: string; cause: { code: string } };
+        assert.equal(data.originalId, route.originalId); assert.equal(data.reverseId, route.reverseId); assert.equal(data.cause.code, 'STREAM_CAPABILITY'); assert.match(error.hint!, /Install Bauble 0\.2\.0 on both ends/); return true;
+      });
+      assert.deepEqual(calls, ['download']); assert.deepEqual(findReturn(f.store, route.reverseId), beforeRoute); assert.deepEqual(f.remote.owner(f.captured.manifest.lineageId), beforeOwner);
+    }
     const completed = await resumeReturn(new Store(f.store.root), route, f.rpc, approve(f.store));
     const nativeBefore = readFileSync(completed.sessionFile); const registrationBefore = f.store.registration(completed.sessionFile);
     const again = await pull(f.captured.manifest.transferId, undefined, f.store, { config: f.config, connect: () => f.rpc });

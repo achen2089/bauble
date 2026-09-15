@@ -25,7 +25,9 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     invariant(route.localRoot === store.root, 'Return local root changed');
     const original = store.manifest(route.originalId); invariant(original.digest === route.originalDigest && original.manifest.destination === route.host, 'Return original binding mismatch');
     const id = route.reverseId; const root = route.remoteRoot;
-    const authority: Rpc = async request => {
+    // Every request belongs to an existing durable route, including read-only retries
+    // after a lost fencing ACK. A connection failure cannot erase that uncertainty.
+    const requestRemote: Rpc = async request => {
       try { return await rpc(request); }
       catch (error) { throw withStreamCapability(error, new CliError('RETURN_UNCERTAIN', `Return ${request.operation} acknowledgment is unavailable; preserve the existing route.`, 'uncertain', 'Reconcile the exact reverse ID; never recapture or remove state.', { originalId: route.originalId, reverseId: id }, [action('Observe reverse route', 'read', 'status', id), action('Reconcile existing return when authorized', 'mutate', 'recover', id)])); }
     };
@@ -38,7 +40,7 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     const finishedPath = join(store.transfer(id), 'return-finished.json');
     const finish = async (digest: string) => {
       if (existsSync(finishedPath)) { invariant(readBytes(finishedPath).toString() === json({ transferId: id, digest }), 'Return finish binding mismatch'); return; }
-      const result = z.object({ finished: z.literal(true) }).strict().parse(await authority({ operation: 'finish', root, data: { id, digest } }));
+      const result = z.object({ finished: z.literal(true) }).strict().parse(await requestRemote({ operation: 'finish', root, data: { id, digest } }));
       invariant(result.finished, 'Source did not acknowledge finish');
       atomicWrite(finishedPath, json({ transferId: id, digest })); boundary('finish');
     };
@@ -60,7 +62,7 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     options.progress?.('capture');
     const captured = route.reverseDigest && existsSync(join(store.transfer(id), 'manifest.json'))
       ? { ...store.manifest(id), checkpoint: store.transfer(id) }
-      : z.object({ manifest: Manifest, digest: Digest, checkpoint: z.string() }).strict().parse(await authority({ operation: 'capture', root, data: { id: route.originalId, digest: route.originalDigest, targetRoot: store.root, destination: 'local', returnId: id } }));
+      : z.object({ manifest: Manifest, digest: Digest, checkpoint: z.string() }).strict().parse(await requestRemote({ operation: 'capture', root, data: { id: route.originalId, digest: route.originalDigest, targetRoot: store.root, destination: 'local', returnId: id } }));
     const reverse = captured.manifest;
     invariant(hash(json(reverse)) === captured.digest && (!route.reverseDigest || route.reverseDigest === captured.digest), 'Reverse immutable digest mismatch');
     invariant(reverse.transferId === id && reverse.parentTransfer === route.originalId && reverse.lineageId === original.manifest.lineageId && reverse.generation === original.manifest.generation + 1 && reverse.destination === 'local' && reverse.instruction === null, 'Reverse lineage/transfer/instruction mismatch');
@@ -71,7 +73,7 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     for (const blob of reverse.blobs) if (!store.blobs.has(blob.hash)) {
       const chunks: Buffer[] = [];
       for (let offset = 0; offset < blob.size; offset += CHUNK) {
-        const data = z.object({ bytes: z.string().max(CHUNK * 2) }).strict().parse(await rpc({ operation: 'download', root, data: { id, digest: blob.hash, offset } }));
+        const data = z.object({ bytes: z.string().max(CHUNK * 2) }).strict().parse(await requestRemote({ operation: 'download', root, data: { id, digest: blob.hash, offset } }));
         const bytes = Buffer.from(data.bytes, 'base64');
         invariant(bytes.toString('base64') === data.bytes && bytes.length === Math.min(CHUNK, blob.size - offset), 'Invalid reverse chunk'); chunks.push(bytes);
       }
@@ -80,7 +82,7 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     options.progress?.('verify'); validateCheckpoint(store, id);
     const snapshot = { ...prepared(store, id, false), originalId: route.originalId, reverseId: id, remoteFrozen: true };
     if (options.prepare || !existsSync(join(store.transfer(id), 'approval.json'))) {
-      const observed = Status.parse(await rpc({ operation: 'status', root, data: { id, digest: captured.digest } }));
+      const observed = Status.parse(await requestRemote({ operation: 'status', root, data: { id, digest: captured.digest } }));
       invariant(observed.transferId === id && observed.digest === captured.digest, 'Reverse status binding mismatch');
       if (observed.phase !== 'captured' || observed.ownership !== 'source') throw new CliError('PHASE_CONFLICT', 'Remote reverse checkpoint has progressed beyond unapproved preparation.', 'target', 'Observe or recover the exact reverse route.', { originalId: route.originalId, reverseId: id, phase: observed.phase }, [action('Observe reverse route', 'read', 'status', id), action('Reconcile existing return when authorized', 'mutate', 'recover', id)]);
       options.onDurable?.(snapshot); if (options.prepare) return snapshot;
@@ -88,11 +90,11 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     options.onDurable?.({ originalId: route.originalId, reverseId: id, digest: captured.digest, checkpoint: store.transfer(id) });
     if (!existsSync(join(store.transfer(id), 'approval.json'))) await approve(id);
     store.approved(id);
-    await rpc({ operation: 'approve', root, data: { id, digest: captured.digest } });
+    await requestRemote({ operation: 'approve', root, data: { id, digest: captured.digest } });
     if (['staging', 'approved', 'captured'].includes(store.status(id).phase)) store.update(id, { phase: 'ready' });
     invariant(store.status(id).phase === 'ready', 'Return is not eligible for finalization');
     const restored = prepareRestore(store, id); boundary('restoration');
-    const fenced = FenceReceipt.parse(await authority({ operation: 'fence', root, data: { id, digest: captured.digest } }));
+    const fenced = FenceReceipt.parse(await requestRemote({ operation: 'fence', root, data: { id, digest: captured.digest } }));
     invariant(fenced.transferId === id && fenced.digest === captured.digest && fenced.lineageId === reverse.lineageId && fenced.generation === reverse.generation, 'Reverse fence receipt mismatch');
     atomicWrite(join(store.transfer(id), 'return-fence.json'), json(fenced)); boundary('fence');
     const reg = store.lock(reverse.lineageId, () => {
