@@ -1,26 +1,15 @@
 import { spawn } from 'node:child_process';
 import { createConnection, createServer, type Server } from 'node:net';
 import { chmodSync } from 'node:fs';
-import { z } from 'zod';
+import { streamRpc, type ManagedRpc } from './stream.js';
 import { Alias } from './schema.js';
-import { invariant, json, removeFile } from './safe.js';
+import { invariant, json } from './safe.js';
 const MAX_MESSAGE = 2 * 1024 * 1024;
-export const Request = z.object({ operation: z.enum(['probe', 'configure-code-root', 'manifest', 'blob', 'ready', 'activate', 'status', 'revoke', 'attach', 'message-check', 'message', 'message-status', 'log', 'capture', 'fence', 'download', 'approve', 'finish']), root: z.string().max(4096), data: z.unknown() }).strict();
-export type Request = z.infer<typeof Request>;
-export type Rpc = (request: Request) => Promise<unknown>;
-export function ssh(alias: string): Rpc {
+export { Request, type Rpc } from './rpc.js';
+/** The caller owns this connection and must close it at command completion. */
+export function ssh(alias: string): ManagedRpc {
   Alias.parse(alias);
-  return request => new Promise((ok, fail) => {
-    const payload = json(Request.parse(request)); invariant(Buffer.byteLength(payload) <= MAX_MESSAGE, 'Protocol message exceeds 2 MiB limit');
-    const child = spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '--', alias, 'bauble _helper'], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = Buffer.alloc(0); let stderr = '';
-    const timer = setTimeout(() => { child.kill(); fail(new Error('SSH timeout; ownership unknown until receipt reconciliation')); }, 120_000);
-    child.on('error', e => { clearTimeout(timer); fail(e); });
-    child.stdout.on('data', chunk => { stdout = Buffer.concat([stdout, chunk]); if (stdout.length > MAX_MESSAGE) { child.kill(); fail(new Error('Oversized protocol response')); } });
-    child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4000); });
-    child.on('close', code => { clearTimeout(timer); if (code !== 0) { fail(new Error(`SSH helper failed (${code}): ${stderr || stdout.toString().slice(0, 4000)}. Install compatible bauble on non-interactive SSH PATH; setup never provisions.`)); return; } try { const response = JSON.parse(stdout.toString()); if (!response.ok) throw new Error(response.error); ok(response.data); } catch (e) { fail(e); } });
-    child.stdin.on('error', fail); child.stdin.end(payload);
-  });
+  return streamRpc(() => spawn('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '--', alias, 'bauble _helper-stream'], { stdio: ['pipe', 'pipe', 'pipe'] }));
 }
 function parseWireJson(bytes: Buffer): unknown {
   const text = bytes.toString('utf8'); invariant(Buffer.from(text).equals(bytes), 'Invalid protocol UTF-8');

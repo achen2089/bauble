@@ -2,8 +2,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { Store } from '../src/store.js';
 import { Manifest, type Config, type Receipt, type Registration } from '../src/schema.js';
 import { fixtureProfile, fixtureRoot } from './fixtures.js';
@@ -191,4 +191,33 @@ test('log CLI: finite JSON and ordered follow NDJSON, then terminal interruption
     const code = await new Promise<number | null>((ok, fail) => { child.on('error', fail); child.on('exit', ok); }); clearTimeout(timer);
     assert.equal(code, 130, stderr); assert.equal(values[0]!.data.text, 'first α\n'); assert.equal(values[1]!.data.text, 'second 🙂\n'); assert.equal(values[1]!.data.sequence, 1); assert.equal(values.at(-1)!.error!.code, 'INTERRUPTED'); assert.deepEqual(readFileSync(join(f.store.transfer(f.id), 'status.json')), before);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+
+for (const mode of ['remote', 'local', 'signal']) test(`log follow: ${mode} revalidation/cleanup and terminal errors stay NDJSON`, async () => {
+  const local = mode === 'local';
+  const f = fixture(); const path = join(f.store.transfer(f.id), 'run.log'); writeFileSync(path, 'first α\n');
+  const configPath = join(f.root, 'log-config.json'); atomicWrite(configPath, json(f.config));
+  const bin = join(f.root, 'bin'); mkdirSync(bin); const count = join(f.root, 'helper-count');
+  const cli = resolve('dist/src/cli.js');
+  writeFileSync(join(bin, 'ssh'), `#!/bin/sh\necho helper >> '${count}'\nexec '${process.execPath}' '${cli}' _helper-stream\n`, { mode: 0o700 });
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, BAUBLE_STATE: local ? f.store.root : f.source.root, BAUBLE_CONFIG: configPath };
+  const child = spawn(process.execPath, [cli, 'log', f.id, '--follow', '--json'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const values: Array<{ ok: boolean; data: { text?: string; sequence?: number }; error: { code: string } | null }> = []; let pending = ''; let stderr = '';
+  child.stderr.on('data', bytes => stderr += bytes); const timer = setTimeout(() => child.kill('SIGKILL'), 8000);
+  child.stdout.on('data', bytes => { pending += bytes.toString(); const lines = pending.split('\n'); pending = lines.pop()!;
+    for (const line of lines) { const value = JSON.parse(line); values.push(value);
+      if (value.ok && value.data.sequence === 0) {
+        if (mode === 'signal') { child.kill('SIGTERM'); continue; }
+        appendFileSync(path, 'not authorized after change\n');
+        if (local) f.store.setOwner({ ...f.store.owner(f.manifest.lineageId), state: 'fenced' });
+        else atomicWrite(configPath, json({ ...f.config, hosts: { 'exact-host': { ...f.config.hosts['exact-host'], root: join(f.root, 'changed') } } }));
+      }
+    }
+  });
+  try {
+    const code = await new Promise<number | null>((ok, fail) => { child.on('error', fail); child.on('close', ok); });
+    assert.equal(code, mode === 'signal' ? 130 : 1, stderr); assert.equal(values.length, 2); assert.equal(values[0]!.data.text, 'first α\n'); assert.equal(values[1]!.ok, false); assert.equal(values[1]!.error!.code, mode === 'signal' ? 'INTERRUPTED' : 'FAILED');
+    assert.equal(existsSync(count) ? readFileSync(count, 'utf8').trim().split('\n').length : 0, local ? 0 : 1);
+  } finally { clearTimeout(timer); child.kill(); rmSync(f.root, { recursive: true, force: true }); }
 });

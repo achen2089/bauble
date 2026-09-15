@@ -50,7 +50,7 @@ export function parseCommand(argv: string[]): Parsed {
   const positions = preliminary.positionals; let name = positions[0] ?? 'help'; let consumed = positions.length ? 1 : 0;
   if (preliminary.values.version) { if (positions.length) usageError('--version cannot be combined with a command.'); name = 'version'; }
   if (name === 'host' && positions[1]) { name += ' ' + positions[1]; consumed = 2; }
-  const internal = ['_helper', '_runtime', '_open', '_attach'].includes(name);
+  const internal = ['_helper', '_helper-stream', '_runtime', '_open', '_attach'].includes(name);
   const spec = commands.find(c => c.name === name);
   if (!spec && !internal) usageError(`Unknown command ${name}. Try bauble help; no command was executed.`);
   const flags = internal ? (name === '_runtime' ? ['root'] : []) : spec!.flags;

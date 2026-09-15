@@ -31,7 +31,9 @@ async function main() {
   const authorization = process.env.BAUBLE_TEST_SSH_HOST;
   invariant(authorization, 'BAUBLE_TEST_SSH_HOST is required to authorize isolated remote fixture activity. Gate FAILED, not skipped.');
   const alias = Alias.parse(authorization); const config = loadConfig(); selectHost(config, alias);
-  const rpc = ssh(alias); const remoteBase = config.hosts[alias]!.root;
+  const rpc = ssh(alias);
+  try {
+  const remoteBase = config.hosts[alias]!.root;
   await rpc({ operation: 'probe', root: remoteBase, data: {} });
   const remoteRoot = join(remoteBase, 'fixtures', randomUUID()); const localRoot = fixtureRoot();
   console.log(`Authorized SSH fixture: ${alias}\nLocal: ${localRoot}\nRemote: ${remoteRoot}`);
@@ -55,13 +57,13 @@ async function main() {
   writeFileSync(join(repo, 'staged.txt'), 'newer original edit survives SSH return');
   // Reconcile the lost outbound acknowledgment through the public recovery implementation.
   const fixtureConfig = { ...config, hosts: { ...config.hosts, [alias]: { ...config.hosts[alias]!, root: remoteRoot } } };
-  await recover(id, false, store, { config: fixtureConfig });
+  await recover(id, false, store, { config: fixtureConfig, connect: () => rpc });
   assert.deepEqual(store.status(id).receipt, receipt);
   await managed.close();
   const route = beginReturn(store, id, alias, remoteRoot);
   const dropFenceAck: Rpc = async request => { const result = await rpc(request); if (request.operation === 'fence') throw new Error('SSH gate injected lost return fence acknowledgment'); return result; };
   await assert.rejects(resumeReturn(store, route, dropFenceAck, async reverseId => { store.approve(reverseId, store.manifest(reverseId).digest); }), { code: 'RETURN_UNCERTAIN' });
-  const restored = await recover(route.reverseId, false, store, { config: fixtureConfig });
+  const restored = await recover(route.reverseId, false, store, { config: fixtureConfig, connect: () => rpc });
   assert.ok(restored && 'sessionFile' in restored); assert.equal(store.status(route.reverseId).phase, 'returned');
   assert.equal(store.owner(reg.lineageId).generation, 2);
   assert.equal(store.registration(restored.sessionFile).cleanShutdown, true);
@@ -76,11 +78,12 @@ async function main() {
   assert.equal(reopened.getLeafId(), restored.leaf, 'Returned native active leaf survives reopening');
   assert.equal(readFileSync(join(repo, 'staged.txt'), 'utf8'), 'newer original edit survives SSH return'); assert.ok(readFileSync(join(repo, '.git/index')).equals(originalIndex)); assert.ok(readFileSync(native.manager.getSessionFile()!).equals(originalSession));
   // Finalized return recovery must be idempotent, with no new runtime or prompt.
-  assert.deepEqual(await recover(route.reverseId, false, store, { config: fixtureConfig }), restored);
+  assert.deepEqual(await recover(route.reverseId, false, store, { config: fixtureConfig, connect: () => rpc }), restored);
   let shutdown = Status.parse(await rpc({ ...request, operation: 'status' }));
   for (let i = 0; i < 20 && shutdown.execution !== 'exited'; i++) { await new Promise(ok => setTimeout(ok, 100)); shutdown = Status.parse(await rpc({ ...request, operation: 'status' })); }
   assert.equal(shutdown.execution, 'exited', 'Graceful return shutdown must be observed, not left idle');
   assert.deepEqual(shutdown.receipt, receipt);
   console.log(json({ passed: true, outbound: id, returned: route.reverseId, processReceipt: receipt, assertions: { attachDetachCycles: 2, sameProcessReceipt: true, lostActivationAcknowledgment: true, lostReturnFenceAcknowledgment: true, literalContinuations: submitted.length, writeToolCalls: calls.length, returnedCleanShutdown: true, remoteExecution: shutdown.execution, returnedLeaf: restored.leaf }, preservedFixtureRoots: [localRoot, remoteRoot] }));
+  } finally { rpc.close(); }
 }
 main().catch(error => { console.error(error instanceof Error ? error.stack : error); process.exitCode = 1; });

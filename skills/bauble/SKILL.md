@@ -7,6 +7,8 @@ description: Launch fresh remote Pi tasks or hand off native sessions with Baubl
 
 Discover the current interface with `bauble help <command>` and `bauble docs --list`. Read `bauble docs quickstart`, `automation`, `configuration`, or `recovery` for the complete manual. JSON in 0.2.0 uses schemaVersion 1 envelopes with named arrays under `data`; accepted/idle/windowRequested never means task done.
 
+Retain stderr as well as stdout: durable IDs are emitted before possible channel loss even with `--json --quiet`. A missing capture manifest is uncertain, not permission to recapture; observe the exact intent/return ID using `status` and read `bauble docs recovery`. Incompatible remote builds require explicit upgrade, never automatic downgrade, replay, or restart.
+
 For explicit agent approval use `run ... --prepare`, `send --session ... --prepare`, or `pull ORIGINAL-ID --prepare` → `inspect EXACT-ID` → user-authorized `approve EXACT-ID --approval-digest SHA256` → `recover EXACT-ID` (REVERSE-ID for returns). Preparation preserves freezes. Never repeat capture to resume, or approve merely to bypass review. `sessions --json` lists only registered local sessions; `status` is cached unless explicitly refreshed.
 
 ## Establish the target

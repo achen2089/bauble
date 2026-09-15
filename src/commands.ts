@@ -1,3 +1,6 @@
+import { appendLog } from './log.js';
+import { recordCaptureIntent } from './capture-intent.js';
+import { rpcScope } from './stream.js';
 import { VERSION, PI_VERSION } from './metadata.js';
 import { approve, prepared } from './approval.js';
 import type { OperationContext } from './output.js';
@@ -33,10 +36,11 @@ export async function setup(alias: string, makeDefault: boolean, codeRoot?: stri
   invariant(result.profileDigest === digest, 'Remote controlled profile differs; configure independently before setup');
   config.hosts[alias] = { root: result.root, ...(result.codeRoot ? { codeRoot: result.codeRoot } : {}), profileDigest: digest }; if (!config.defaultHost || makeDefault) config.defaultHost = alias; saveConfig(config); return { alias, defaultHost: config.defaultHost ?? null, root: result.root, ...(configured ? { configured } : {}) };
 }
-export async function captureSelected(store: Store, selected: string, destination: string, targetRoot: string, instruction?: string, sensitive?: string[], history?: string[]) {
+export async function captureSelected(store: Store, selected: string, destination: string, targetRoot: string, instruction?: string, sensitive?: string[], history?: string[], transferId?: string, expectedRegistration?: Registration) {
   const reg = store.registration(selected);
-  if (!reg.cleanShutdown && processMatches(reg)) return z.object({ manifest: Manifest, digest: z.string(), checkpoint: z.string() }).parse(await control(reg.socket, { operation: 'capture', destination, targetRoot, instruction: instruction ?? null, sensitive, history }));
-  return captureOffline({ store, registration: reg, destination, targetRoot, instruction, sensitive, history });
+  if (expectedRegistration) invariant(json(reg) === json(expectedRegistration), 'Source registration changed before capture');
+  if (!reg.cleanShutdown && processMatches(reg)) return z.object({ manifest: Manifest, digest: z.string(), checkpoint: z.string() }).parse(await control(reg.socket, { operation: 'capture', destination, targetRoot, instruction: instruction ?? null, sensitive, history, id: transferId }));
+  return captureOffline({ store, registration: reg, destination, targetRoot, instruction, sensitive, history, transferId });
 }
 export async function send(options: { session?: string; checkpoint?: string; host?: string; instructionFile?: string; approvalDigest?: string; sensitive?: string[]; history?: string[]; prepare?: boolean }, store = new Store(), dialog?: (text: string) => Promise<boolean>, context: OperationContext = {}, connect: (alias: string) => Rpc = ssh) {
   const config = loadConfig(); invariant(Boolean(options.session) !== Boolean(options.checkpoint), 'Select exactly one --session or --checkpoint');
@@ -46,11 +50,15 @@ export async function send(options: { session?: string; checkpoint?: string; hos
     invariant(!options.host && !options.instructionFile, 'Existing checkpoint retains destination, instruction and transfer ID');
     const directory = resolve(options.checkpoint); const manifest = readJson(join(directory, 'manifest.json'), Manifest); id = manifest.transferId; alias = selectHost(config, manifest.destination);
     if (directory !== store.transfer(id)) { const digest = store.putManifest(manifest); const approval = JSON.parse(readBytes(join(directory, 'approval.json')).toString()); invariant(approval.digest === digest && approval.destination === alias, 'Checkpoint lacks original matching approval'); for (const blob of manifest.blobs) invariant(store.blobs.put(readBytes(join(directory, 'blobs', blob.hash))) === blob.hash, 'Corrupt checkpoint'); store.approve(id, digest); }
-    store.approved(id);
+    const approved = store.approved(id); context.onDurable?.({ transferId: id, digest: approved.digest, checkpoint: store.transfer(id) });
   } else {
     alias = selectHost(config, options.host); const instruction = options.instructionFile ? readBytes(options.instructionFile, 1024 * 1024).toString('utf8') : undefined;
+    const registration = store.registration(options.session!); id = randomUUID();
+    recordCaptureIntent(store, id, registration, alias, config.hosts[alias]!.root, instruction);
+    context.onDurable?.({ transferId: id, capture: 'intent', checkpoint: store.transfer(id) });
     context.progress?.('capture');
-    const captured = await captureSelected(store, options.session!, alias, config.hosts[alias]!.root, instruction, options.sensitive, options.history); id = captured.manifest.transferId;
+    const captured = await captureSelected(store, options.session!, alias, config.hosts[alias]!.root, instruction, options.sensitive, options.history, id, registration);
+    invariant(captured.manifest.transferId === id && captured.digest === store.manifest(id).digest, 'Capture acknowledgment does not match the durable intent');
     const snapshot = prepared(store, id, true); context.onDurable?.(snapshot);
     if (options.prepare) return snapshot;
     await approve(store, id, options.approvalDigest, dialog, false, context);
@@ -81,7 +89,7 @@ export async function captureLive(managed: Managed, store: Store, options: { des
 export async function hostRuntime(options: { session?: string; store: Store; profilePath: string; cwd: string; registration?: Registration; transferId?: string; interactive?: boolean; allowTest?: boolean; fresh?: { lineageId: string; generation: number; parentTransfer: string; name?: string } }) {
   const { createManaged } = await import('./pi/runtime.js');
   const { store } = options; let managed!: Managed;
-  managed = await createManaged({ ...options, observe: execution => { if (options.transferId) { store.update(options.transferId, { execution }); store.event(options.transferId, { execution }); } }, handoff: async (host, dialog) => { await send({ session: managed.registration.sessionFile, host }, store, dialog); } });
+  managed = await createManaged({ ...options, observe: execution => { if (options.transferId) { store.update(options.transferId, { execution }); store.event(options.transferId, { execution }); } }, handoff: async (host, dialog) => { const scope = rpcScope(ssh); try { await send({ session: managed.registration.sessionFile, host }, store, dialog, {}, scope.connect); } finally { scope.close(); } } });
   const socket = managed.registration.socket; removeFile(socket);
   const server = await controlServer(socket, async raw => {
     if (raw && typeof raw === 'object' && 'operation' in raw && raw.operation === 'message') {
@@ -98,7 +106,7 @@ export async function hostRuntime(options: { session?: string; store: Store; pro
   const close = managed.close.bind(managed); managed.close = async () => { server.close(); removeFile(socket); await close(); };
   if (options.transferId) {
     const id = options.transferId; const { manifest, digest } = store.manifest(id); const token = `b${id.replaceAll('-', '')}`;
-    managed.runtime.session.subscribe(event => { store.event(id, { nativeEvent: event.type }); if (event.type === 'message_end') { const m = event.message; atomicWrite(join(store.transfer(id), 'run.log'), readBytesOrEmpty(join(store.transfer(id), 'run.log')) + json(managed.guard.messageReserved ? { role: m.role, contentOmitted: 'Bauble message; inspect the sensitive native transcript explicitly' } : m)); } });
+    managed.runtime.session.subscribe(event => { store.event(id, { nativeEvent: event.type }); if (event.type === 'message_end') { const m = event.message; appendLog(join(store.transfer(id), 'run.log'), json(managed.guard.messageReserved ? { role: m.role, contentOmitted: 'Bauble message; inspect the sensitive native transcript explicitly' } : m)); } });
     let mode: ReturnType<typeof terminal> | undefined;
     if (options.interactive !== false) { mode = terminal(managed.runtime); await mode.init(); }
     else await managed.runtime.session.bindExtensions({ mode: 'print' });
@@ -112,7 +120,6 @@ export async function hostRuntime(options: { session?: string; store: Store; pro
   } else if (options.interactive !== false) await managed.run();
   return managed;
 }
-function readBytesOrEmpty(path: string) { return existsSync(path) ? readBytes(path).toString() : ''; }
 export async function internalRuntime(id: string, root: string, interactive = true) {
   const store = new Store(root); const { manifest } = store.manifest(id); const status = store.status(id);
   invariant(status.phase === 'launch_intent' && !status.receipt, 'Runtime already started or lacks launch intent; never restart automatically');

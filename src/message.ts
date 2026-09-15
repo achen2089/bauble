@@ -180,7 +180,7 @@ export async function messageSession(id: string, text: string, requestId: string
   const dispatch = Dispatch.parse({ requestId, textDigest, ...route }); const rpc = rpcFor(dispatch, options, store);
   let ready: unknown;
   try { ready = await rpc({ operation: 'message-check', root: dispatch.root, data: { receipt: dispatch.receipt } }); }
-  catch (error) { throw new Error(`${messageCapabilityError} ${error instanceof Error ? error.message : 'Verification failed'}`); }
+  catch (error) { if (error instanceof CliError) throw error; throw new CliError('CAPABILITY', messageCapabilityError, 'capability'); }
   const capability = z.object({ capability: z.literal(MESSAGE_CAPABILITY), receipt: Receipt }).strict().parse(ready); sameReceipt(capability.receipt, dispatch.receipt);
   invariant(json(routeMessage(store, id, config)) === json(route), 'Message route/owner changed before intent');
   const created = withLock(join(store.root, 'message-locks', requestId), () => {

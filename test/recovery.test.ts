@@ -1,7 +1,10 @@
+import { execute } from '../src/execute.js';
+import { parseCommand } from '../src/registry.js';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fixtureRoot, fixtureRepo, fixtureProfile, fixtureSession } from './fixtures.js';
 import { Store } from '../src/store.js';
@@ -140,7 +143,25 @@ for (const lost of ['capture', 'fence'] as const) test(`return recovery: lost ${
     await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), { code: 'RETURN_UNCERTAIN' });
     assert.equal(f.store.owner(f.captured.manifest.lineageId).state, 'fenced');
     assert.equal(f.remote.owner(f.captured.manifest.lineageId).transferId, route.reverseId);
-    const reg = await recover(route.reverseId, false, new Store(f.store.root), { config: f.config, connect: () => f.rpc, approvalDigest: f.remote.manifest(route.reverseId).digest });
+    const configPath = join(f.root, 'config.json'); writeFileSync(configPath, JSON.stringify(f.config));
+    const previousState = process.env.BAUBLE_STATE; const previousConfig = process.env.BAUBLE_CONFIG;
+    let reg: { sessionFile: string; cwd: string };
+    try {
+      process.env.BAUBLE_STATE = f.store.root; process.env.BAUBLE_CONFIG = configPath;
+      if (lost === 'capture') {
+        assert.equal(existsSync(join(f.store.transfer(route.reverseId), 'manifest.json')), false);
+        const observed = spawnSync(process.execPath, [resolve('dist/src/cli.js'), 'status', route.reverseId, '--json'], { env: process.env, encoding: 'utf8' });
+        assert.equal(observed.status, 0, observed.stderr); const data = JSON.parse(observed.stdout).data;
+        assert.equal(data.observation, 'return-route'); assert.equal(data.reverseId, route.reverseId); assert.equal(data.phase, 'unknown');
+      }
+      let connections = 0; let closed = 0; const captureIds: string[] = [];
+      const result = await execute(parseCommand(['recover', route.reverseId, '--approval-digest', f.remote.manifest(route.reverseId).digest, '--json']), { connect: () => { connections++; return Object.assign(async (request: Parameters<Rpc>[0]) => { if (request.operation === 'capture') captureIds.push((request.data as { returnId: string }).returnId); return f.rpc(request); }, { close() { closed++; } }); } });
+      assert.equal(connections, 1); assert.equal(closed, 1); assert.ok(captureIds.every(id => id === route.reverseId));
+      assert.ok('sessionFile' in result.data); reg = result.data;
+    } finally {
+      if (previousState === undefined) delete process.env.BAUBLE_STATE; else process.env.BAUBLE_STATE = previousState;
+      if (previousConfig === undefined) delete process.env.BAUBLE_CONFIG; else process.env.BAUBLE_CONFIG = previousConfig;
+    }
     assert.ok(reg && 'sessionFile' in reg); assert.equal(f.store.status(route.reverseId).phase, 'returned');
     assert.equal(f.launches(), 1, 'Return/recovery never starts another runtime');
     assert.equal(readFileSync(join(f.repo, 'newer-local.txt'), 'utf8'), 'do not overwrite newer original edits');

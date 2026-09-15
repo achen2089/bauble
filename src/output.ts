@@ -25,7 +25,7 @@ function human(command: string, data: object): string {
   if (command === 'version') return `Bauble ${value.version} — Pi ${value.piVersion}`;
   if (command === 'inspect') return JSON.stringify(data, null, 2);
   if (command === 'log') return String(value.text ?? '');
-  for (const key of ['transfers', 'sessions', 'hosts', 'topics']) if (Array.isArray(value[key])) return `${key}: ${value[key].length ? '\n' + value[key].map(row => typeof row === 'string' ? row : fields(row)).join('\n') : '(none)'}`;
+  for (const key of ['transfers', 'sessions', 'hosts', 'topics']) if (Array.isArray(value[key])) return `${key === 'hosts' ? 'defaultHost: ' + (value.defaultHost ?? '(none)') + '\n' : ''}${key}: ${value[key].length ? '\n' + value[key].map(row => typeof row === 'string' ? row : fields(row)).join('\n') : '(none)'}`;
   return fields(value);
 }
 function fields(value: Record<string, unknown>): string { return Object.entries(value).filter(([, v]) => v !== undefined).map(([key, v]) => `${key}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join('\n'); }

@@ -1,3 +1,4 @@
+import { captureObservation } from './capture-intent.js';
 import { Store } from './store.js';
 import { loadConfig } from './config.js';
 import { CliError } from './errors.js';
@@ -5,10 +6,16 @@ import type { Parsed } from './registry.js';
 import { action, approvalActions, type NextAction, type OperationContext } from './output.js';
 import { inspect, listTransfers, nextFor, resolveTransfer, sessions, status, transferSummary } from './queries.js';
 import { ssh, type Rpc } from './transport.js';
+import { rpcScope } from './stream.js';
 import type { OperationalData } from './payloads.js';
 export interface Execution { data: OperationalData; nextActions: NextAction[]; exitCode?: number; error?: { code: string; message: string; hint: string | null } }
-export interface ExecutionContext extends OperationContext { connect?: (alias: string) => Rpc }
+export interface ExecutionContext extends OperationContext { connect?: (alias: string) => Rpc; signal?: AbortSignal }
 export async function execute(parsed: Parsed, context: ExecutionContext): Promise<Execution> {
+  const scope = rpcScope(context.connect ?? ssh); const abort = () => scope.close(); context.signal?.addEventListener('abort', abort, { once: true });
+  try { return await executeCommand(parsed, { ...context, connect: scope.connect }); }
+  finally { context.signal?.removeEventListener('abort', abort); scope.close(); }
+}
+async function executeCommand(parsed: Parsed, context: ExecutionContext): Promise<Execution> {
   const { command, args, values: v } = parsed; const s = (key: string) => v[key] as string | undefined; const b = (key: string) => Boolean(v[key]); const array = (key: string) => v[key] as string[] | undefined;
   const done = (data: OperationalData, nextActions: NextAction[] = []): Execution => ({ data, nextActions });
   const connect = context.connect ?? ssh;
@@ -31,6 +38,7 @@ export async function execute(parsed: Parsed, context: ExecutionContext): Promis
   const selection = resolveTransfer(args[0]!); const id = selection.id;
   const readOnly = ['status', 'inspect', 'log', 'open', 'attach', 'message-status'].includes(command); const store = readOnly ? selection.store : new Store(selection.store.root);
   if (command === 'status') return done(await status(store, id, b('refresh'), connect), nextFor(store, id));
+  const capture = captureObservation(store, id); if (capture && capture.checkpoint !== 'complete') throw new CliError('CAPTURE_UNCERTAIN', 'Capture checkpoint is missing or partial; never recapture or unfreeze.', 'uncertain', 'Read status for this exact intent and inspect recorded registration/owner bindings.', capture);
   if (command === 'inspect') return done(inspect(store, id), nextFor(store, id));
   if (command === 'approve') { await (await import('./approval.js')).approve(store, id, s('approval-digest')); return done({ transferId: id, digest: store.manifest(id).digest, approved: true }, [action('Resume exact snapshot when authorized', 'mutate', 'recover', id)]); }
   if (command === 'message' || command === 'message-status') {
