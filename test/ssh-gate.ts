@@ -60,9 +60,9 @@ async function main() {
   await managed.close();
   const route = beginReturn(store, id, alias, remoteRoot);
   const dropFenceAck: Rpc = async request => { const result = await rpc(request); if (request.operation === 'fence') throw new Error('SSH gate injected lost return fence acknowledgment'); return result; };
-  await assert.rejects(resumeReturn(store, route, dropFenceAck, async reverseId => { store.approve(reverseId, store.manifest(reverseId).digest); }), /injected lost return fence/);
+  await assert.rejects(resumeReturn(store, route, dropFenceAck, async reverseId => { store.approve(reverseId, store.manifest(reverseId).digest); }), { code: 'RETURN_UNCERTAIN' });
   const restored = await recover(route.reverseId, false, store, { config: fixtureConfig });
-  assert.ok(restored); assert.equal(store.status(route.reverseId).phase, 'returned');
+  assert.ok(restored && 'sessionFile' in restored); assert.equal(store.status(route.reverseId).phase, 'returned');
   assert.equal(store.owner(reg.lineageId).generation, 2);
   assert.equal(store.registration(restored.sessionFile).cleanShutdown, true);
   assert.equal(readFileSync(join(restored.cwd, 'ssh-result.txt'), 'utf8'), 'real SSH native Pi tool result');

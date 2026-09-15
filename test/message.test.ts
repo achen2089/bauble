@@ -292,9 +292,9 @@ test('message CLI: explicit request-ID status, literal argv and local state rout
     let stdout = ''; let stderr = ''; child.on('error', fail); child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; }); child.on('exit', code => ok({ code, stdout, stderr }));
   });
   const requestId = randomUUID(); const text = '-literal $(touch NEVER)\n/bauble';
-  const sent = await cli(['message', f.id, '--request-id', requestId, '--', text]); assert.equal(sent.code, 0, sent.stderr); assert.equal(JSON.parse(sent.stdout).state, 'accepted'); assert.ok(!sent.stderr.includes(text));
-  await settled(f); const status = await cli(['message-status', f.id, '--request-id', requestId]); assert.equal(status.code, 0); assert.equal(JSON.parse(status.stdout).requestId, requestId);
-  assert.equal((await cli(['message-status', f.id])).code, 1); assert.equal((await cli(['message', f.id, 'a', 'b'])).code, 1);
+  const sent = await cli(['message', f.id, '--json', '--request-id', requestId, '--', text]); assert.equal(sent.code, 0, sent.stderr); assert.equal(JSON.parse(sent.stdout).data.state, 'accepted'); assert.ok(!sent.stderr.includes(text));
+  await settled(f); const status = await cli(['message-status', f.id, '--json', '--request-id', requestId]); assert.equal(status.code, 0); assert.equal(JSON.parse(status.stdout).data.requestId, requestId);
+  assert.equal((await cli(['message-status', f.id])).code, 2); assert.equal((await cli(['message', f.id, 'a', 'b'])).code, 2);
   assert.equal(userTexts(f).filter(t => t === text).length, 1);
 });
 

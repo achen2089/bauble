@@ -5,6 +5,10 @@ description: Launch fresh remote Pi tasks or hand off native sessions with Baubl
 
 # Bauble
 
+Discover the current interface with `bauble help <command>` and `bauble docs --list`. Read `bauble docs quickstart`, `automation`, `configuration`, or `recovery` for the complete manual. JSON in 0.2.0 uses schemaVersion 1 envelopes with named arrays under `data`; accepted/idle/windowRequested never means task done.
+
+For explicit agent approval use `run ... --prepare`, `send --session ... --prepare`, or `pull ORIGINAL-ID --prepare` → `inspect EXACT-ID` → user-authorized `approve EXACT-ID --approval-digest SHA256` → `recover EXACT-ID` (REVERSE-ID for returns). Preparation preserves freezes. Never repeat capture to resume, or approve merely to bypass review. `sessions --json` lists only registered local sessions; `status` is cached unless explicitly refreshed.
+
 ## Establish the target
 
 1. Inspect `bauble --help`, `bauble ls --json`, and the effective configuration (`BAUBLE_CONFIG` or `~/.config/bauble/config.json`). Preserve any explicit `BAUBLE_STATE` override. For missing configuration, follow the host-setup branch below; report a missing CLI instead of installing without authorization.

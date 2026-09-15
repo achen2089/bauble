@@ -1,3 +1,4 @@
+import { CliError } from './errors.js';
 import { targetRepository } from './targets.js';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -17,6 +18,11 @@ export type AttachRunner = (file: string, args: string[]) => Promise<void>;
 export const runAttached: AttachRunner = (file, args) => new Promise((ok, fail) => {
   const child = spawn(file, args, { stdio: 'inherit' });
   child.on('error', fail); child.on('exit', (code, signal) => code === 0 ? ok() : fail(new Error(`Attachment exited ${code ?? signal}`)));
+});
+const runWindowRequest: AttachRunner = (file, args) => new Promise((ok, fail) => {
+  // osascript may print a tab descriptor; it is not a public command result.
+  const child = spawn(file, args, { stdio: 'ignore' });
+  child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error('Terminal window request failed')));
 });
 interface OpenOptions {
   config?: Config; connect?: (alias: string) => Rpc; verify?: typeof verifyLocalAttachment;
@@ -47,7 +53,7 @@ export function attachmentStore(id: string, config: Config, selected = new Store
   // Explicit BAUBLE_STATE is authoritative; otherwise an exact manifest may select remoteRoot.
   if (existsSync(join(selected.transfer(id), 'manifest.json')) || stateOverride || resolve(selected.root) === resolve(config.remoteRoot)) return selected;
   const path = join(resolve(config.remoteRoot), 'transfers', id, 'manifest.json');
-  return existsSync(path) ? new Store(resolve(config.remoteRoot)) : selected;
+  return existsSync(path) ? new Store(resolve(config.remoteRoot), selected.readOnly) : selected;
 }
 export function shellQuote(value: string) {
   invariant(!value.includes('\0'), 'NUL is not valid in terminal argv');
@@ -75,14 +81,14 @@ export async function attachResolved(value: OpenTicket, store: Store, options: O
 }
 export async function openSession(id: string, here = false, store = new Store(), options: OpenOptions = {}) {
   Id.parse(id);
-  if (here) invariant(options.interactive ?? (process.stdin.isTTY && process.stdout.isTTY), 'open --here requires an interactive terminal; run it in a terminal (SSH users: allocate a TTY with ssh -t)');
-  else invariant((options.platform ?? process.platform) === 'darwin', 'Opening a new terminal window is supported only on macOS with Terminal.app; on Linux/headless hosts run bauble open <transfer-id> --here in an interactive terminal');
+  if (here && !(options.interactive ?? (process.stdin.isTTY && process.stdout.isTTY))) throw new CliError('CAPABILITY', 'open --here requires an interactive terminal; run it in a terminal (SSH users: allocate a TTY with ssh -t)', 'capability');
+  if (!here && (options.platform ?? process.platform) !== 'darwin') throw new CliError('CAPABILITY', 'Opening a new terminal window is supported only on macOS with Terminal.app; on Linux/headless hosts run bauble open <transfer-id> --here in an interactive terminal', 'capability');
   const value = await resolveAttachment(id, store, options);
   if (here) await attachResolved(value, store, options);
   else {
-    try { await (options.run ?? runAttached)('/usr/bin/osascript', ['-e', terminalScript, '--', terminalCommand(value, options.configFile ?? configPath())]); }
-    catch (error) { throw new Error(`Could not open Terminal.app; allow Terminal automation or use bauble open ${id} --here in an interactive terminal. ${String(error)}`); }
-    console.log('Requested Terminal window; the terminal revalidates ownership and shows attachment errors. No Pi process was launched.');
+    try { await (options.run ?? runWindowRequest)('/usr/bin/osascript', ['-e', terminalScript, '--', terminalCommand(value, options.configFile ?? configPath())]); }
+    catch (error) { throw new CliError('CAPABILITY', `Could not open Terminal.app; allow Terminal automation or use bauble open ${id} --here in an interactive terminal.`, 'capability'); }
+    return { windowRequested: true as const };
   }
 }
 export async function terminalOpen(encoded: string) {

@@ -17,7 +17,7 @@ test('guard: real Pi routes reject frozen input, bash, tools, settings, model/th
   assert.ok(readFileSync(session.sessionFile!).equals(bytes));
   managed.guard.unfreeze();
   const ownerPath = store.ownerPath(managed.registration.lineageId); renameSync(ownerPath, ownerPath + '.missing');
-  assert.throws(() => session.prompt('storage failure'), /ENOENT/);
+  assert.throws(() => session.prompt('storage failure'), { code: 'CORRUPT_STATE' });
   assert.equal((await session.extensionRunner.emitInput('blocked storage', undefined, 'interactive')).action, 'handled');
   renameSync(ownerPath + '.missing', ownerPath);
   await managed.close(); rmSync(root, { recursive: true, force: true });

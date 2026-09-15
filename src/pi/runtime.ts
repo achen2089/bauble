@@ -6,15 +6,15 @@ import { dirname, join, resolve } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { Store } from '../store.js';
 import { type Profile, type Registration } from '../schema.js';
-import { hash, invariant, json, listFiles, privateDir, readBytes, run } from '../safe.js';
+import { hash, invariant, json, listFiles, privateDir, readBytes } from '../safe.js';
 import { readProfile, snapshotProfile, checkRequirements } from './profile.js';
 import { Guard } from './guard.js';
 import { baubleExtension, type PiHost } from './extension.js';
 import { fixtureProvider } from './fixture.js';
 import { runtimeSignature, validateSession } from './native.js';
 
-export function processIdentity(pid = process.pid) { return run('ps', ['-p', String(pid), '-o', 'lstart=']).toString().trim(); }
-export function processMatches(reg: Pick<Registration, 'pid' | 'start'>) { try { return processIdentity(reg.pid) === reg.start; } catch { return false; } }
+import { processIdentity, processMatches } from '../process.js';
+export { processIdentity, processMatches } from '../process.js';
 export interface Managed {
   runtime: AgentSessionRuntime; guard: Guard; registration: Registration; profile: Profile;
   settled(): Promise<Registration>; close(): Promise<void>; run(): Promise<void>;

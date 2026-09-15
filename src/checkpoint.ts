@@ -1,3 +1,4 @@
+import { PI_VERSION } from './metadata.js';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { existsSync, realpathSync } from 'node:fs';
@@ -16,7 +17,7 @@ export function captureCheckpoint(options: { store: Store; registration: Registr
   const native = captureNative(reg, options.profile, store.blobs, options.live);
   const targetRepo = join(options.targetRoot, 'runs', transferId, 'workspace', 'worktree');
   const refs = [...new Set([...(workspace.bundle ? [workspace.bundle] : []), ...workspace.index.map(i => i.hash), ...workspace.files.flatMap(i => i.hash ? [i.hash] : []), native.session, ...native.resources.map(r => r.hash), ...native.artifacts.map(a => a.hash)])].sort();
-  const manifest: Manifest = { protocol: 1, transferId, lineageId: reg.lineageId, parentTransfer: reg.parentTransfer, generation: reg.generation + 1, created: new Date().toISOString(), agent: 'pi', piVersion: '0.85.1', destination: options.destination, source: { repository: root, cwd: reg.cwd }, target: { repository: targetRepo, cwd: join(targetRepo, relative(root, realpathSync(reg.cwd))) }, instruction: options.instruction ?? null, workspace, native, blobs: refs.map(hash => ({ hash, size: store.blobs.get(hash).length })) };
+  const manifest: Manifest = { protocol: 1, transferId, lineageId: reg.lineageId, parentTransfer: reg.parentTransfer, generation: reg.generation + 1, created: new Date().toISOString(), agent: 'pi', piVersion: PI_VERSION, destination: options.destination, source: { repository: root, cwd: reg.cwd }, target: { repository: targetRepo, cwd: join(targetRepo, relative(root, realpathSync(reg.cwd))) }, instruction: options.instruction ?? null, workspace, native, blobs: refs.map(hash => ({ hash, size: store.blobs.get(hash).length })) };
   const digest = store.putManifest(manifest);
   store.lock(reg.lineageId, () => {
     const current = store.owner(reg.lineageId);

@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { Store } from './store.js';
 import { Digest, Id, Receipt, Registration, type Config } from './schema.js';
 import { invariant, json, run } from './safe.js';
-import { processMatches } from './pi/runtime.js';
+import { processMatches } from './process.js';
 import { control } from './transport.js';
 
 export const reopenGuidance = 'Open/attach never starts Pi. For missing or uncertain receipts, run bauble recover <transfer-id>. For a closed remote session, use bauble pull <transfer-id>, then explicitly run its printed bauble pi --session command. For returned or closed local sessions, explicitly use bauble pi --session <verified-registered-path> only after confirming local ownership and old runtime shutdown.';

@@ -1,12 +1,24 @@
 {
   "name": "bauble",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Native Pi session checkpoints and fenced SSH round trips",
   "type": "module",
-  "engines": {"node": ">=22.19.0"},
-  "bin": {"bauble": "dist/src/cli.js"},
-  "exports": {".": "./dist/src/index.js", "./extension": "./dist/src/pi/extension.js"},
-  "files": ["dist/src", "README.md", "skills/bauble"],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "bauble": "dist/src/cli.js"
+  },
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./extension": "./dist/src/pi/extension.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "skills/bauble",
+    "docs"
+  ],
   "scripts": {
     "build": "tsc",
     "check": "npm run build && node --test dist/test/*.test.js",
@@ -14,11 +26,14 @@
     "test:ssh": "npm run build && node dist/test/ssh-gate.js"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1",
     "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
     "@earendil-works/pi-tui": "0.85.1",
     "ignore": "7.0.5",
     "zod": "4.3.6"
   },
-  "devDependencies": {"@types/node": "24.10.1", "typescript": "5.9.3"}
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  }
 }

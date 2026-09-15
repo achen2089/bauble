@@ -1,3 +1,4 @@
+import { CliError } from './errors.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, lstatSync, readdirSync, unlinkSync, rmdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, posix } from 'node:path';
@@ -46,11 +47,11 @@ export function safeLink(path: string, target: string) {
 }
 export function withLock<T>(path: string, fn: () => T): T {
   privateDir(dirname(path));
-  try { mkdirSync(path, { mode: 0o700 }); } catch { throw new Error(`Locked: ${path}; reconcile explicitly, never remove a live lock`); }
+  try { mkdirSync(path, { mode: 0o700 }); } catch { throw new CliError('BUSY', `Locked: ${path}; reconcile explicitly, never remove a live lock`, 'busy'); }
   try { return fn(); } finally { rmdirSync(path); }
 }
 export async function withAsyncLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
-  privateDir(dirname(path)); try { mkdirSync(path, { mode: 0o700 }); } catch { throw new Error(`Locked: ${path}`); }
+  privateDir(dirname(path)); try { mkdirSync(path, { mode: 0o700 }); } catch { throw new CliError('BUSY', `Locked: ${path}`, 'busy', 'Reconcile explicitly; never remove an existing lock.'); }
   try { return await fn(); } finally { rmdirSync(path); }
 }
 export function run(command: string, args: string[], options: { cwd?: string; input?: string | Buffer; env?: NodeJS.ProcessEnv; maxBuffer?: number } = {}) {

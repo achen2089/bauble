@@ -29,7 +29,7 @@ test('protocol: verified chunks, duplicate starts, lost acknowledgments and real
   const changed = structuredClone(checkpoint.manifest); changed.instruction = 'different';
   await assert.rejects(rpc({ operation: 'manifest', root: destination, data: { manifest: changed, digest: hash(json(changed)) } }), /different payload/);
   const losing: Rpc = async request => { const result = await rpc(request); if (request.operation === 'activate') throw new Error('injected lost acknowledgment'); return result; };
-  await assert.rejects(sendCheckpoint(store, id, losing, destination), /lost acknowledgment/);
+  await assert.rejects(sendCheckpoint(store, id, losing, destination), { code: 'AUTHORITY_UNCERTAIN' });
   assert.equal(store.status(id).phase, 'unknown'); assert.equal(store.owner(reg.lineageId).state, 'fenced'); assert.equal(launches, 1);
   await Promise.all([rpc({ operation: 'activate', root: destination, data: { id, digest: checkpoint.digest } }), rpc({ operation: 'activate', root: destination, data: { id, digest: checkpoint.digest } })]);
   assert.equal(launches, 1); assert.equal(remoteStore.status(id).continuation, 'accepted'); assert.ok(remoteStore.status(id).receipt);
@@ -48,7 +48,7 @@ test('protocol: verified chunks, duplicate starts, lost acknowledgments and real
 });
 
 test('CLI and SSH gate cannot silently approve or select a newest session', () => {
-  assert.throws(() => run(process.execPath, ['dist/src/cli.js', 'send', '--yes']), /Unknown option/);
+  assert.throws(() => run(process.execPath, ['dist/src/cli.js', 'send', '--yes']), /USAGE/);
   const root = fixtureRoot(); const store = new Store(join(root, 'state')); assert.throws(() => store.registration('any-session'), /registered session/); rmSync(root, { recursive: true, force: true });
 });
 

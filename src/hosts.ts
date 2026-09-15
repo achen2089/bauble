@@ -7,7 +7,7 @@ import { configPath, loadConfig, saveConfig } from './config.js';
 import { atomicWrite, invariant, json, readBytes } from './safe.js';
 import { readProfile, validateModel } from './pi/profile.js';
 import { hasGit } from './workspace.js';
-import { setup } from './commands.js';
+
 
 export async function bootstrapConfig(profileInput?: string) {
   if (existsSync(configPath())) { invariant(!profileInput || resolve(profileInput) === loadConfig().profile, 'Existing config profile is unchanged; configure matching profiles explicitly'); return; }
@@ -22,8 +22,7 @@ export async function bootstrapConfig(profileInput?: string) {
     await validateModel(profile, process.env.BAUBLE_STATE ?? root);
     profilePath = join(dirname(configPath()), 'profile.json'); invariant(!existsSync(profilePath), 'Refusing to overwrite existing profile.json; supply --profile'); atomicWrite(profilePath, json(profile));
   }
-  const profile = readProfile(profilePath);
-  console.log(json({ bootstrapProfile: profilePath, effective: profile, exclusions: 'No ambient extensions, packages, instructions, skills, prompts, settings, model overrides or credentials copied. Destination must already have matching controlled profile and independent credentials.' }));
+  readProfile(profilePath);
   saveConfig({ version: 1, hosts: {}, profile: profilePath, localRoot: root, remoteRoot: root });
 }
 export function validateCodeRoot(path: string, state: string) {
@@ -38,9 +37,9 @@ export function configureCodeRoot(path: string) {
   saveConfig({ ...config, codeRoot: path }); return { codeRoot: path, backup };
 }
 export async function hostCommand(action: string, alias?: string, options: { makeDefault?: boolean; profile?: string; codeRoot?: string } = {}) {
-  if (action === 'add') { invariant(alias, 'host add requires SSH alias'); Alias.parse(alias); await bootstrapConfig(options.profile); await setup(alias, options.makeDefault ?? false, options.codeRoot); return; }
+  if (action === 'add') { invariant(alias, 'host add requires SSH alias'); Alias.parse(alias); await bootstrapConfig(options.profile); return (await import('./commands.js')).setup(alias, options.makeDefault ?? false, options.codeRoot); }
   const config = loadConfig(); invariant(!options.profile && !options.codeRoot && !options.makeDefault, 'host list/default do not accept setup options');
-  if (action === 'list') { invariant(!alias, 'host list takes no alias'); console.log(json({ defaultHost: config.defaultHost ?? null, hosts: config.hosts })); return; }
+  if (action === 'list') { invariant(!alias, 'host list takes no alias'); return { defaultHost: config.defaultHost ?? null, hosts: Object.entries(config.hosts).map(([alias, host]) => ({ alias, ...host })) }; }
   invariant(action === 'default' && alias && config.hosts[Alias.parse(alias)], 'Use host add <alias>, host list, or host default <configured-alias>');
-  saveConfig({ ...config, defaultHost: alias }); console.log(`Default host: ${alias}`);
+  saveConfig({ ...config, defaultHost: alias }); return { defaultHost: alias };
 }

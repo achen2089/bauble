@@ -1,8 +1,9 @@
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { Store } from '../src/store.js';
 import { Manifest, type Config, type Receipt, type Registration } from '../src/schema.js';
 import { fixtureProfile, fixtureRoot } from './fixtures.js';
@@ -146,8 +147,8 @@ test('open: actionable headless/TTY/window errors, and CLI usage', async () => {
     await assert.rejects(openSession(f.id, false, f.store, { ...options, platform: 'linux' }), /Linux\/headless.*--here/);
     await assert.rejects(openSession(f.id, true, f.store, { ...options, interactive: false }), /interactive terminal.*ssh -t/);
     await assert.rejects(openSession(f.id, false, f.store, { ...options, platform: 'darwin' }), /Could not open Terminal.app.*--here/);
-    assert.match(run(process.execPath, ['dist/src/cli.js', '--help']).toString(), /open <id> \[--here\]/);
-    assert.throws(() => run(process.execPath, ['dist/src/cli.js', 'attach', f.id, '--here']), /supported only by open/);
+    assert.match(run(process.execPath, ['dist/src/cli.js', 'open', '--help']).toString(), /--here/);
+    assert.throws(() => run(process.execPath, ['dist/src/cli.js', 'attach', f.id, '--here']), /USAGE/);
     await assert.rejects(openSession('not-an-id', true, f.store, { ...options, interactive: true }));
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -173,4 +174,21 @@ test('open: actual isolated tmux pane PID plus control receipt verifies; replace
     server?.close(); try { run('tmux', ['-L', f.receipt.socket, 'kill-server']); } catch { /* Only this test's isolated tmux server. */ }
     rmSync(f.root, { recursive: true, force: true });
   }
+});
+
+test('log CLI: finite JSON and ordered follow NDJSON, then terminal interruption without state changes', async () => {
+  const f = fixture(); const path = join(f.store.transfer(f.id), 'run.log'); writeFileSync(path, 'first α\n');
+  const configPath = join(f.root, 'log-config.json'); atomicWrite(configPath, json(f.config));
+  const env = { ...process.env, BAUBLE_STATE: f.store.root, BAUBLE_CONFIG: configPath };
+  try {
+    const before = readFileSync(join(f.store.transfer(f.id), 'status.json'));
+    const finite = spawnSync(process.execPath, ['dist/src/cli.js', 'log', f.id, '--json'], { env, encoding: 'utf8' }); assert.equal(finite.status, 0, finite.stderr); assert.equal(JSON.parse(finite.stdout).data.text, 'first α\n');
+    const child = spawn(process.execPath, ['dist/src/cli.js', 'log', f.id, '--follow', '--json'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const values: Array<{ ok: boolean; data: { sequence?: number; text?: string }; error: { code: string } | null }> = []; let pending = ''; let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 8000);
+    child.stdout.on('data', bytes => { pending += bytes.toString(); const lines = pending.split('\n'); pending = lines.pop()!; for (const line of lines) { const value = JSON.parse(line); values.push(value); if (value.ok && value.data.sequence === 0) appendFileSync(path, 'second 🙂\n'); if (value.ok && value.data.text === 'second 🙂\n') child.kill('SIGINT'); } });
+    const code = await new Promise<number | null>((ok, fail) => { child.on('error', fail); child.on('exit', ok); }); clearTimeout(timer);
+    assert.equal(code, 130, stderr); assert.equal(values[0]!.data.text, 'first α\n'); assert.equal(values[1]!.data.text, 'second 🙂\n'); assert.equal(values[1]!.data.sequence, 1); assert.equal(values.at(-1)!.error!.code, 'INTERRUPTED'); assert.deepEqual(readFileSync(join(f.store.transfer(f.id), 'status.json')), before);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
 });

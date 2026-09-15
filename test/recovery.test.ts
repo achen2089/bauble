@@ -88,7 +88,7 @@ test('premature pull leaves outbound recovery available after activation dispatc
       if (request.operation === 'activate' && failActivation) throw new Error('activation not dispatched');
       return handleRequest(request, { config: f.config, allowFixture: true, launch: async () => { launches++; } });
     };
-    await assert.rejects(sendCheckpoint(f.store, id, rpc, f.destination), /activation not dispatched/);
+    await assert.rejects(sendCheckpoint(f.store, id, rpc, f.destination), { code: 'AUTHORITY_UNCERTAIN' });
     assert.equal(new Store(f.destination).status(id).phase, 'ready');
     assert.throws(() => beginReturn(f.store, id, f.alias, f.destination), /recover the outbound transfer/);
     assert.equal(findReturn(f.store, id), undefined);
@@ -137,7 +137,7 @@ for (const lost of ['capture', 'fence'] as const) test(`return recovery: lost ${
   try {
     const route = beginReturn(f.store, f.captured.manifest.transferId, f.alias, f.destination); let once = true;
     const losing: Rpc = async request => { const result = await f.rpc(request); if (request.operation === lost && once) { once = false; throw new Error(`lost ${lost} acknowledgment`); } return result; };
-    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), /lost .* acknowledgment/);
+    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), { code: 'RETURN_UNCERTAIN' });
     assert.equal(f.store.owner(f.captured.manifest.lineageId).state, 'fenced');
     assert.equal(f.remote.owner(f.captured.manifest.lineageId).transferId, route.reverseId);
     const reg = await recover(route.reverseId, false, new Store(f.store.root), { config: f.config, connect: () => f.rpc, approvalDigest: f.remote.manifest(route.reverseId).digest });
@@ -227,7 +227,7 @@ test('return recovery retries lost finish acknowledgment separately, with no cap
   try {
     const route = beginReturn(f.store, f.captured.manifest.transferId, f.alias, f.destination);
     const losing: Rpc = async request => { const result = await f.rpc(request); if (request.operation === 'finish') throw new Error('lost finish acknowledgment'); return result; };
-    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), /lost finish/);
+    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), { code: 'RETURN_UNCERTAIN' });
     assert.equal(f.store.status(route.reverseId).phase, 'returned');
     const calls: string[] = []; const retry: Rpc = request => { calls.push(request.operation); return f.rpc(request); };
     await recover(route.reverseId, false, f.store, { config: f.config, connect: () => retry });
