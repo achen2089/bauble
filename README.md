@@ -1,10 +1,36 @@
 # Bauble
 
-Native Pi session checkpoints and cooperative SSH ownership handoffs. Requires Node **>=22.19.0**, Git, and the exact `@earendil-works/pi-{coding-agent,ai,tui}` **0.85.1** packages. Remote destinations require Linux and tmux >=3.2.
+**Move a native Pi session to another machine—and bring it back.**
 
-**Pre-release implementation.** Offline native context/workspace and protocol tests are included. Live SSH integration must pass on each intended host before trusting a handoff. See [Limits](#limits); the full v1 acceptance plan is not yet satisfied.
+Bauble checkpoints your conversation, Git workspace, and explicitly declared resources, then hands ownership to a Pi runtime over SSH. Attach to the existing remote terminal, send it an instruction, or pull the session back into a separate local workspace without overwriting your original checkout.
+
+- **Keep context:** preserve native session history, branches, and supported compactions.
+- **Review before sending:** approve an inventory bound to the exact checkpoint and destination.
+- **Hand off ownership:** cooperative fencing prevents managed runtimes from working as competing owners.
+- **Return safely:** restore into a private repository rather than merge over newer local edits.
+
+> **Pre-release:** offline tests are included, but live SSH integration must pass on each intended host before you trust a handoff. The full v1 acceptance plan is not yet satisfied. See [Limits](#limits) and [Verification](#verification). Cooperative fencing is not a security sandbox.
+
+## Contents
+
+- [Install and configure](#install-and-configure)
+- [Bauble skill](#bauble-skill)
+- [Native Pi and transfer](#native-pi-and-transfer)
+- [Message the existing Pi](#message-the-existing-pi)
+- [Persistence and recovery](#persistence-and-recovery)
+- [Limits](#limits)
+- [Verification](#verification)
 
 ## Install and configure
+
+### Requirements
+
+- Node.js **>=22.19.0** and Git on each machine.
+- The exact `@earendil-works/pi-{coding-agent,ai,tui}` **0.85.1** dependencies (installed by `npm ci`).
+- Linux and **tmux >=3.2** on remote destinations, reachable through configured SSH aliases.
+- Pi credentials configured independently on each machine.
+
+### Install
 
 On each machine, manually install Bauble on the **non-interactive SSH PATH**:
 
@@ -16,6 +42,8 @@ npm install --global .
 ```
 
 Setup never installs packages, provisions hosts, transfers credentials, or modifies SSH/tmux settings. Credentials are configured independently with Pi on each machine. Bauble reads local Pi authentication; no auth file or credential value is checkpointed. Trust the destination with **all** included history and transcripts.
+
+### Configure
 
 Create `~/.config/bauble/config.json` (or set `BAUBLE_CONFIG`). All paths must be absolute. There are **no built-in hosts or model defaults**. Replace the example paths and explicitly select your provider/model in the profile before use:
 
@@ -55,7 +83,38 @@ Resources are explicit files/directories relative to the profile file or absolut
 
 Run `bauble setup <ssh-alias>` for each destination. The first successfully validated host becomes default; `--default` changes it. Hosts are interchangeable destinations, not a migration chain. Personal host selection is configuration data; this repository does not modify your personal configuration. State defaults to `~/.local/state/bauble`, or configured `localRoot`; `BAUBLE_STATE` overrides it for isolation.
 
+## Bauble skill
+
+The bundled [Bauble skill](skills/bauble/SKILL.md) teaches an agent how to select an explicit session, request an approved handoff, message an existing runtime, and handle recovery without replaying uncertain work. It is guidance—not a replacement for the CLI, host setup, or checkpoint approval.
+
+For ordinary Pi sessions, copy the skill from this repository into your user skill directory (check for an existing directory or symlink first):
+
+```sh
+mkdir -p ~/.pi/agent/skills
+cp -R skills/bauble ~/.pi/agent/skills/bauble
+```
+
+Start a new Pi session, then invoke it explicitly:
+
+```text
+/skill:bauble help me hand off this session to my configured SSH host
+```
+
+**Managed `bauble pi` sessions do not load global skills.** Add the complete skill directory to the controlled profile's `skills` array, preserving any existing entries:
+
+```json
+"skills": ["/absolute/path/to/bauble/skills/bauble"]
+```
+
+Configure the matching skill contents in the destination profile before launching a managed session. Changing a profile after launch invalidates checkpoint eligibility. The skill is also included in the npm package under `skills/bauble`.
+
+`/skill:bauble` loads agent guidance; `/bauble [host]` opens the native transfer approval dialog. Skill commands sent through `bauble message` or a continuation instruction remain literal text and are not expanded.
+
 ## Native Pi and transfer
+
+### Start locally
+
+After configuring and validating a destination with `bauble setup <ssh-alias>`:
 
 ```sh
 cd /path/to/committed-git-repo
@@ -70,6 +129,8 @@ Launch workflow: start a managed local Pi in a Git repository with a commit, do 
 This uses Pi's exported runtime, services and native terminal UI with an isolated resource loader. No ambient global/project/package extensions, instructions, skills, templates or settings are enabled. Startup catalog/update/telemetry network activity is disabled; approved inference remains available. Missing credentials, model fallback, unexpected tools or profile changes fail closed.
 
 Explicitly opening a bare JSONL adopts it into the **current** controlled profile; this does not certify its former runtime configuration. A bare file cannot be sent directly. Sessions without complete persisted assistant activity are not transferable.
+
+### Review and send
 
 Inside the running terminal use `/bauble [host]`. The transfer dialog blocks competing terminal input; `j`/`k` scroll the inventory, `y` approves and `n` rejects. Or:
 
@@ -86,6 +147,8 @@ By default ignored and likely-secret untracked files are excluded. `--include-se
 **Quiesce editors, builds, watchers and other external writers.** Capture does not stash, commit, reset, clean, or write the source index. It captures HEAD's self-contained bundle, raw stage-zero index blobs and file inventories, then compares the source again before fencing. It is not an OS-wide atomic filesystem snapshot.
 
 With no instruction the destination is idle in a native Pi terminal. An approved instruction is submitted literally with extension-command/skill/template expansion disabled. An acceptance event means accepted input, **not successful task completion**. Delivery ambiguity is recorded as uncertain and never automatically replayed.
+
+### Observe, attach, and return
 
 ```sh
 bauble ls --json
@@ -115,9 +178,13 @@ bauble message <transfer-id> --request-id <uuid> -- '-literal text'
 
 A Pi agent can invoke the same CLI. **Use one explicit UUID per intended message and retain it before submission.** Omitting `--request-id` generates a fresh UUID, durably records it and prints it before delivery; repeating a command without the option is a new request, not a retry. Text is one nonempty UTF-8 argument, limited to **64 KiB**, without NUL. Quote for your invoking shell (or pass an argv array); Bauble transports text as JSON data, never as SSH shell interpolation. Helper stdin/control envelopes are bounded to 2 MiB. There is no text-from-stdin mode in this slice.
 
+### Delivery and admission
+
 Routing selects only the exact transfer's local destination owner or configured outbound SSH fence, manifest digest, generation, native session and readiness process receipt (PID/start/nonce). The helper revalidates the live guarded control socket on the destination; no tmux attachment is needed. Missing registration/readiness, stale/frozen/fenced ownership or a closed runtime fails closed. Use `recover` for missing readiness, not an automatic restart. Messaging never launches Pi, reopens the source, changes ownership or searches unmanaged sessions. It uses Bauble's private local socket and SSH helper, with no Intercom or network API server.
 
 Only a **fully idle** runtime admits a message. A guard reservation excludes competing terminal input, mutations and capture from preflight through the settled run. Busy work is neither aborted nor queued. A positive `rejected` result (including `reason: busy`) is terminal for that UUID: wait until fully idle, resolve preflight requirements, then explicitly choose a **new** request ID if you still want delivery. Extension commands, skill commands and prompt templates are disabled; `/bauble`, `/skill:...`, `/template` and `!command` are literal model input, not commands.
+
+### Receipts and retries
 
 Results are JSON with the request ID, text SHA-256, exact process receipt, `state` and `task: not-tracked`:
 
@@ -127,6 +194,8 @@ Results are JSON with the request ID, text SHA-256, exact process receipt, `stat
 - `absent`: no destination record was found by a standalone status query. This is not proof a delayed request cannot arrive. Once a client dispatch intent exists, even a missing destination record is reported as `uncertain`.
 
 Both client dispatch intent (`message-outbox/<uuid>.json`) and destination inbox intent (`message-inbox/<uuid>.json`) durably bind UUID, text digest and exact receipt before native delivery. The client also binds the SSH alias/storage root. Same-ID/same-text retries perform read-only reconciliation; they **never retransmit** a previously recorded client intent, even if it crashed before sending. Different text/transfer bindings are rejected. Destination duplicates return the existing receipt; orphaned intent remains uncertain forever unless the original in-flight invocation records its native acknowledgment. There is no transcript-hash guessing, task replay or automatic repair. Status does not change receipts or ownership and can read retained historical receipts after shutdown. Keep these ledgers; deleting them destroys duplicate protection. CLI exit zero means `accepted`, not task success; other delivery states exit nonzero.
+
+### Compatibility and privacy
 
 The existing runtime must advertise **`message-v1`**. Installing a new CLI does not upgrade an already-running Pi: an older runtime/helper produces an explicit capability error. No restart or in-place monkeypatch is attempted. Install the same build on both ends for future launches; any lifecycle change for an old runtime is a separate explicit decision.
 
@@ -145,11 +214,15 @@ bauble recover <transfer-id> --cancel
 
 Recovery reconciles an outbound transfer's existing receipt, resumes safe staging even if the destination never received the manifest, or resends authority for the same ready/fenced transfer ID. Cancelled transfers are rejected before any authority RPC; recovery requires the exact approved transfer/digest/generation under the lineage lock. Before authority is issued a captured/approved checkpoint can be cancelled locally. After authority issuance, cancellation requires a **positive durable destination revocation** and proof activation never happened. Activated/ambiguous launches cannot be cancelled; use pull or resolve the ambiguity. An unreachable host never releases ownership. Tombstones, checkpoints and receipts are retained; no automatic destructive cleanup.
 
-**Interrupted returns:** `pull` prints and durably records a reverse recovery ID before contacting the remote source. Repeat `pull <original-id>` or `recover <reverse-id>` (also accepted: the original ID) to resume that same return. `returns/<reverse-id>.json` binds the original and reverse IDs/digests to the configured host and storage roots. Lost capture acknowledgments reuse the existing remote checkpoint; they never generate another ID or unfreeze an earlier capture. Approval remains bound to the reverse manifest; unattended recovery can supply its exact `--approval-digest`.
+### Interrupted returns
+
+`pull` prints and durably records a reverse recovery ID before contacting the remote source. Repeat `pull <original-id>` or `recover <reverse-id>` (also accepted: the original ID) to resume that same return. `returns/<reverse-id>.json` binds the original and reverse IDs/digests to the configured host and storage roots. Lost capture acknowledgments reuse the existing remote checkpoint; they never generate another ID or unfreeze an earlier capture. Approval remains bound to the reverse manifest; unattended recovery can supply its exact `--approval-digest`.
 
 Restoration writes a digest-bound completion receipt only after flushing the materialized files/directories. Recovery validates and reuses that completed workspace, native session, resources and artifacts. It re-obtains an exact positive remote fencing receipt before local ownership release, then idempotently records the local claim, registration and returned status. A lost finish acknowledgment is retried separately. Recovery never launches Pi, sends input, or overwrites a subsequently opened registration. Keep the original fenced runtime closed before completing local ownership release.
 
-**Crash recovery limits:** an orphaned runtime/lineage lock is intentionally not auto-removed. Investigate recorded PID/start identity, owner generation, receipts, native files, and destination revocation before any manual state repair. Partial restoration roots without a completion receipt, changed restored bytes, publication interrupted before capture-owner binding, and registrations opened before returned-status persistence fail closed for manual inspection; nothing is automatically deleted or rebuilt. Return cancellation is not automated: `recover --cancel` rejects a pending return rather than guessing remote ownership. Do not delete fencing files to force a start. Missing source clean-shutdown metadata blocks offline send. A failed capture before an immutable checkpoint exists safely unfreezes only the unchanged owner acquired by that capture; publication or a changed binding retains the freeze.
+### Crash recovery limits
+
+An orphaned runtime/lineage lock is intentionally not auto-removed. Investigate recorded PID/start identity, owner generation, receipts, native files, and destination revocation before any manual state repair. Partial restoration roots without a completion receipt, changed restored bytes, publication interrupted before capture-owner binding, and registrations opened before returned-status persistence fail closed for manual inspection; nothing is automatically deleted or rebuilt. Return cancellation is not automated: `recover --cancel` rejects a pending return rather than guessing remote ownership. Do not delete fencing files to force a start. Missing source clean-shutdown metadata blocks offline send. A failed capture before an immutable checkpoint exists safely unfreezes only the unchanged owner acquired by that capture; publication or a changed binding retains the freeze.
 
 ## Limits
 
