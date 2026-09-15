@@ -19,7 +19,7 @@ export interface Managed {
   runtime: AgentSessionRuntime; guard: Guard; registration: Registration; profile: Profile;
   settled(): Promise<Registration>; close(): Promise<void>; run(): Promise<void>;
 }
-export async function createManaged(options: { store: Store; profilePath: string; cwd: string; session?: string; manager?: SessionManager; registration?: Registration; handoff?: PiHost['handoff']; observe?: PiHost['observe']; allowTest?: boolean }): Promise<Managed> {
+export async function createManaged(options: { store: Store; profilePath: string; cwd: string; session?: string; manager?: SessionManager; registration?: Registration; handoff?: PiHost['handoff']; observe?: PiHost['observe']; allowTest?: boolean; fresh?: { lineageId: string; generation: number; parentTransfer: string; name?: string } }): Promise<Managed> {
   process.env.PI_OFFLINE = '1'; process.env.PI_SKIP_VERSION_CHECK = '1'; process.env.PI_TELEMETRY = '0';
   process.umask(0o077);
   const { store } = options; const profile = readProfile(options.profilePath);
@@ -36,10 +36,10 @@ export async function createManaged(options: { store: Store; profilePath: string
       const path = reg?.sessionFile ?? resolve(options.session!); const bytes = readBytes(path);
       const last = JSON.parse(bytes.toString().trim().split('\n').at(-1)!); validateSession(bytes, reg?.leaf ?? last.id, profile.testOnly);
       manager = SessionManager.open(path); if (reg?.leaf) manager.branch(reg.leaf);
-    } else manager = SessionManager.create(options.cwd, join(store.root, 'native-sessions'));
+    } else { manager = SessionManager.create(options.cwd, options.fresh ? join(store.root, 'runs', options.fresh.parentTransfer, 'native', 'sessions') : join(store.root, 'native-sessions')); if (options.fresh?.name) manager.appendSessionInfo(options.fresh.name); }
   }
-  const lineage = reg?.lineageId ?? randomUUID(); const generation = reg?.generation ?? 0;
-  if (!reg) store.setOwner({ lineageId: lineage, generation, transferId: null, state: 'owned' });
+  const lineage = reg?.lineageId ?? options.fresh?.lineageId ?? randomUUID(); const generation = reg?.generation ?? options.fresh?.generation ?? 0;
+  if (!reg && !options.fresh) store.setOwner({ lineageId: lineage, generation, transferId: null, state: 'owned' });
   const guard = new Guard(store, lineage, generation); guard.check();
   const runtimeLock = join(store.root, 'runtime-locks', lineage); privateDir(dirname(runtimeLock));
   try { mkdirSync(runtimeLock, { mode: 0o700 }); } catch { throw new Error('Lineage runtime lock exists; reconcile explicitly, never automatically restart a possibly live runtime'); }
@@ -86,7 +86,7 @@ export async function createManaged(options: { store: Store; profilePath: string
     if (reg) invariant(reg.runtimeSignature === signature, 'Native runtime requirements/tool schema mismatch');
     const socketDir = join(tmpdir(), `bauble-${process.getuid!()}`); privateDir(socketDir);
     invariant(lstatSync(socketDir).uid === process.getuid!() && (lstatSync(socketDir).mode & 0o077) === 0, 'Control socket directory must be private and owned by this user');
-    reg = { lineageId: lineage, generation, parentTransfer: reg?.parentTransfer ?? null, sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile()!, cwd: manager.getCwd(), leaf: manager.getLeafId(), profileDigest: snapshot.digest, runtimeSignature: signature, cleanShutdown: false, sessionHash: existsSync(manager.getSessionFile()!) ? hash(readBytes(manager.getSessionFile()!)) : null, pid: process.pid, nonce: randomUUID(), start: processIdentity(), socket: join(socketDir, `${hash(store.root + lineage).slice(0, 24)}.sock`), profilePath: resolve(options.profilePath) };
+    reg = { lineageId: lineage, generation, parentTransfer: reg?.parentTransfer ?? options.fresh?.parentTransfer ?? null, sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile()!, cwd: manager.getCwd(), leaf: manager.getLeafId(), profileDigest: snapshot.digest, runtimeSignature: signature, cleanShutdown: false, sessionHash: existsSync(manager.getSessionFile()!) ? hash(readBytes(manager.getSessionFile()!)) : null, pid: process.pid, nonce: randomUUID(), start: processIdentity(), socket: join(socketDir, `${hash(store.root + lineage).slice(0, 24)}.sock`), profilePath: resolve(options.profilePath) };
     store.register(reg);
     guard.onMutation = () => {
       reg = { ...reg!, leaf: manager!.getLeafId(), sessionHash: existsSync(manager!.getSessionFile()!) ? hash(readBytes(manager!.getSessionFile()!)) : null, cleanShutdown: false };

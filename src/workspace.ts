@@ -2,6 +2,7 @@ import { existsSync, lstatSync, readlinkSync, mkdirSync, symlinkSync, chmodSync,
 import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { captureFolder, folderInventory, restoreFolder } from './folder.js';
 import { Blobs } from './blobs.js';
 import { Workspace, type FileEntry } from './schema.js';
 import { atomicWrite, hash, invariant, json, privateDir, readBytes, run, safeLink, safePath, validatePaths } from './safe.js';
@@ -51,6 +52,7 @@ function historyPaths(root: string): string[] {
   return [...paths].sort();
 }
 export function inventory(root: string, blobs: Blobs, approveSensitive: string[] = []): Pick<Workspace, 'head' | 'index' | 'files' | 'excluded'> {
+  if (!hasGit(root)) return folderInventory(root, blobs);
   preflight(root); const head = text(git(root, ['rev-parse', 'HEAD'])); const index = indexEntries(root, blobs);
   const tracked = nul(git(root, ['ls-files', '-z']));
   const untracked = nul(git(root, ['ls-files', '--others', '--exclude-standard', '-z']));
@@ -89,7 +91,9 @@ export function validateInventory(files: FileEntry[]) {
   const links = files.filter(f => f.type === 'symlink').map(f => f.path);
   for (const f of files.filter(f => f.type === 'symlink')) { const destination = relative('/', resolve('/', dirname(f.path), f.target!)); invariant(!links.some(p => destination === p || destination.startsWith(p + '/')), `Chained symlink unsupported: ${f.path}`); }
 }
+export function hasGit(cwd: string) { let path = resolve(cwd); while (true) { if (existsSync(join(path, '.git')) || (existsSync(join(path, 'HEAD')) && existsSync(join(path, 'objects')) && existsSync(join(path, 'config')))) return true; const parent = dirname(path); if (parent === path) return false; path = parent; } }
 export function captureWorkspace(cwd: string, blobs: Blobs, sensitiveApproved: string[] = [], historyApproved: string[] = []): { root: string; workspace: Workspace } {
+  if (!hasGit(cwd)) { invariant(!sensitiveApproved.length && !historyApproved.length, 'Plain folders do not support sensitive/history inclusion overrides'); const root = realpathSync(cwd); return { root, workspace: captureFolder(root, blobs) }; }
   const root = repository(cwd); const before = inventory(root, blobs, sensitiveApproved);
   const historySensitive = historyPaths(root);
   for (const path of historySensitive) invariant(historyApproved.includes(path), `Git bundle includes sensitive historical bytes; explicit history inclusion required: ${path}`);
@@ -102,10 +106,13 @@ export function assertWorkspaceUnchanged(root: string, workspace: Workspace, blo
   const { head, index, files, excluded } = workspace;
   invariant(json({ head, index, files, excluded }) === json(inventory(root, blobs, workspace.sensitiveApproved)), 'Source workspace changed; fresh capture and approval required');
 }
-export function restoreWorkspace(workspace: Workspace, blobs: Blobs, destination: string) {
+export function restoreWorkspace(workspace: Workspace, blobs: Blobs, destination: string, target?: string) {
   Workspace.parse(workspace); validateInventory(workspace.files); validatePaths(workspace.index.map(i => i.path));
   invariant(!existsSync(destination), `Destination already exists: ${destination}`); privateDir(destination);
-  const bare = join(destination, 'objects.git'); const worktree = join(destination, 'worktree');
+  const worktree = target ?? join(destination, 'worktree');
+  if (workspace.head === null) return restoreFolder(workspace, blobs, worktree);
+  invariant(workspace.bundle, 'Missing Git bundle');
+  const bare = join(destination, 'objects.git');
   git(destination, ['init', '--bare', '--template=', bare]); atomicWrite(join(bare, 'bauble-owned.json'), json({ version: 1 }));
   const bundle = join(destination, 'history.bundle'); atomicWrite(bundle, blobs.get(workspace.bundle));
   git(bare, ['bundle', 'verify', bundle]);

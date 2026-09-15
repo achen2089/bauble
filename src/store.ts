@@ -47,7 +47,7 @@ export class Store {
   verify(id: string) {
     const { manifest, digest } = this.manifest(id); const seen = new Set<string>();
     for (const blob of manifest.blobs) { invariant(!seen.has(blob.hash), 'Duplicate blob inventory'); seen.add(blob.hash); invariant(this.blobs.get(blob.hash).length === blob.size, 'Blob size mismatch'); }
-    const required = [manifest.workspace.bundle, ...manifest.workspace.index.map(i => i.hash), ...manifest.workspace.files.flatMap(f => f.hash ? [f.hash] : []), manifest.native.session, ...manifest.native.resources.map(r => r.hash), ...manifest.native.artifacts.map(a => a.hash)];
+    const required = [...(manifest.workspace.bundle ? [manifest.workspace.bundle] : []), ...manifest.workspace.index.map(i => i.hash), ...manifest.workspace.files.flatMap(f => f.hash ? [f.hash] : []), ...(manifest.native.session ? [manifest.native.session] : []), ...((manifest.inputs ?? []).map(i => i.hash)), ...manifest.native.resources.map(r => r.hash), ...manifest.native.artifacts.map(a => a.hash)];
     invariant(required.every(h => seen.has(h)), 'Referenced blob absent from approved inventory'); return { manifest, digest };
   }
   fence(id: string) {

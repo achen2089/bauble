@@ -1,3 +1,5 @@
+import { prepareFresh } from './fresh.js';
+import { dispatchTask } from './run.js';
 import { createInterface } from 'node:readline/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -17,23 +19,25 @@ import { beginReturn, findReturn, resumeReturn } from './return.js';
 import { attachResolved, resolveAttachment } from './open.js';
 import { acceptMessage, MESSAGE_CAPABILITY, MessageSubmission } from './message.js';
 
-export async function approve(store: Store, id: string, explicit?: string, dialog?: (text: string) => Promise<boolean>) {
+export async function approve(store: Store, id: string, explicit?: string, dialog?: (text: string) => Promise<boolean>, autoApprove = false) {
   const { manifest, digest } = store.manifest(id); const text = approvalText(manifest, digest);
+  if (autoApprove) { console.log(text); store.approve(id, digest); atomicWrite(join(store.transfer(id), 'autoapproval.json'), json({ id, digest, destination: manifest.destination, scope: 'return this immutable result snapshot only' })); return; }
   if (explicit !== undefined) { invariant(explicit === digest, 'Explicit approval digest does not match this immutable manifest/destination'); store.approve(id, digest); return; }
   if (dialog) invariant(await dialog(text), 'Transfer not approved; source remains frozen until explicit recovery/cancellation');
   else { console.log(text); invariant(process.stdin.isTTY && process.stdout.isTTY, `Interactive approval required; inspect checkpoint and supply --approval-digest ${digest} (no --yes)`); const input = createInterface({ input: process.stdin, output: process.stdout }); try { invariant(await input.question('Approve this exact digest and destination? Type the full digest: ') === digest, 'Transfer not approved'); } finally { input.close(); } }
   store.approve(id, digest);
 }
-export async function setup(alias: string, makeDefault: boolean) {
+export async function setup(alias: string, makeDefault: boolean, codeRoot?: string) {
   Alias.parse(alias); const config = loadConfig(); const store = new Store();
   const profile = readProfile(config.profile); const digest = snapshotProfile(profile, dirname(config.profile), store.blobs).digest;
-  const result = z.object({ protocol: z.literal(1), version: z.literal('0.1.0'), piVersion: z.literal('0.85.1'), profileDigest: z.string(), root: z.string() }).passthrough().parse(await ssh(alias)({ operation: 'probe', root: config.remoteRoot, data: {} }));
+  if (codeRoot) { const configured = await ssh(alias)({ operation: 'configure-code-root', root: '', data: { codeRoot } }); console.log(json(configured)); }
+  const result = z.object({ protocol: z.literal(1), version: z.literal('0.1.0'), piVersion: z.literal('0.85.1'), profileDigest: z.string(), root: z.string(), codeRoot: z.string().optional() }).passthrough().parse(await ssh(alias)({ operation: 'probe', root: config.hosts[alias]?.root ?? '', data: {} }));
   invariant(result.profileDigest === digest, 'Remote controlled profile differs; configure independently before setup');
-  config.hosts[alias] = { root: result.root, profileDigest: digest }; if (!config.defaultHost || makeDefault) config.defaultHost = alias; saveConfig(config); console.log(`Configured ${alias}${config.defaultHost === alias ? ' (default)' : ''}`);
+  config.hosts[alias] = { root: result.root, ...(result.codeRoot ? { codeRoot: result.codeRoot } : {}), profileDigest: digest }; if (!config.defaultHost || makeDefault) config.defaultHost = alias; saveConfig(config); console.log(`Configured ${alias}${config.defaultHost === alias ? ' (default)' : ''}`);
 }
 export async function captureSelected(store: Store, selected: string, destination: string, targetRoot: string, instruction?: string, sensitive?: string[], history?: string[]) {
   const reg = store.registration(selected);
-  if (processMatches(reg)) return z.object({ manifest: Manifest, digest: z.string(), checkpoint: z.string() }).parse(await control(reg.socket, { operation: 'capture', destination, targetRoot, instruction: instruction ?? null, sensitive, history }));
+  if (!reg.cleanShutdown && processMatches(reg)) return z.object({ manifest: Manifest, digest: z.string(), checkpoint: z.string() }).parse(await control(reg.socket, { operation: 'capture', destination, targetRoot, instruction: instruction ?? null, sensitive, history }));
   return captureOffline({ store, registration: reg, destination, targetRoot, instruction, sensitive, history });
 }
 export async function send(options: { session?: string; checkpoint?: string; host?: string; instructionFile?: string; approvalDigest?: string; sensitive?: string[]; history?: string[] }, store = new Store(), dialog?: (text: string) => Promise<boolean>) {
@@ -51,8 +55,8 @@ export async function send(options: { session?: string; checkpoint?: string; hos
     await approve(store, id, options.approvalDigest, dialog);
   }
   const result = await sendCheckpoint(store, id, ssh(alias), config.hosts[alias]!.root); console.log(json(result));
-  const reg = store.registration(store.manifest(id).manifest.native.sessionId);
-  if (processMatches(reg)) await control(reg.socket, { operation: 'finish', id }); return result;
+  const nativeId = store.manifest(id).manifest.native.sessionId; invariant(nativeId, 'Fresh tasks use run/recover, not send'); const reg = store.registration(nativeId);
+  if (!reg.cleanShutdown && processMatches(reg)) await control(reg.socket, { operation: 'finish', id }); return result;
 }
 export async function captureLive(managed: Managed, store: Store, options: { destination: string; targetRoot: string; instruction?: string; sensitive?: string[]; history?: string[]; transferId?: string }) {
   // Reject a duplicate before entering rollback scope. It did not acquire the earlier freeze.
@@ -73,7 +77,7 @@ export async function captureLive(managed: Managed, store: Store, options: { des
     throw error;
   }
 }
-export async function hostRuntime(options: { session?: string; store: Store; profilePath: string; cwd: string; registration?: Registration; transferId?: string; interactive?: boolean; allowTest?: boolean }) {
+export async function hostRuntime(options: { session?: string; store: Store; profilePath: string; cwd: string; registration?: Registration; transferId?: string; interactive?: boolean; allowTest?: boolean; fresh?: { lineageId: string; generation: number; parentTransfer: string; name?: string } }) {
   const { store } = options; let managed!: Managed;
   managed = await createManaged({ ...options, observe: execution => { if (options.transferId) { store.update(options.transferId, { execution }); store.event(options.transferId, { execution }); } }, handoff: async (host, dialog) => { await send({ session: managed.registration.sessionFile, host }, store, dialog); } });
   const socket = managed.registration.socket; removeFile(socket);
@@ -110,17 +114,21 @@ function readBytesOrEmpty(path: string) { return existsSync(path) ? readBytes(pa
 export async function internalRuntime(id: string, root: string, interactive = true) {
   const store = new Store(root); const { manifest } = store.manifest(id); const status = store.status(id);
   invariant(status.phase === 'launch_intent' && !status.receipt, 'Runtime already started or lacks launch intent; never restart automatically');
+  if (manifest.native.session === null) {
+    try { const prepared = prepareFresh(store, id); return await hostRuntime({ store, profilePath: prepared.profilePath, cwd: prepared.cwd, fresh: { lineageId: manifest.lineageId, generation: manifest.generation, parentTransfer: id, name: manifest.name }, transferId: id, interactive, allowTest: manifest.native.profile.testOnly }); }
+    catch (e) { store.update(id, { phase: 'unknown', execution: 'failed', error: String(e) }); throw e; }
+  }
   const restored = JSON.parse(readBytes(join(root, 'runs', id, 'restored.json')).toString());
-  const registration: Registration = { ...restored, lineageId: manifest.lineageId, generation: manifest.generation, parentTransfer: id, profileDigest: manifest.native.profileDigest, runtimeSignature: manifest.native.runtimeSignature, cleanShutdown: true, sessionHash: hash(readBytes(restored.sessionFile)), pid: process.pid, nonce: randomUUID(), start: processIdentity(), socket: '' };
+  const registration: Registration = { ...restored, lineageId: manifest.lineageId, generation: manifest.generation, parentTransfer: id, profileDigest: manifest.native.profileDigest, runtimeSignature: manifest.native.runtimeSignature!, cleanShutdown: true, sessionHash: hash(readBytes(restored.sessionFile)), pid: process.pid, nonce: randomUUID(), start: processIdentity(), socket: '' };
   try { return await hostRuntime({ store, profilePath: restored.profilePath, cwd: restored.cwd, registration, session: restored.sessionFile, transferId: id, interactive, allowTest: manifest.native.profile.testOnly }); }
   catch (e) { store.update(id, { phase: 'unknown', execution: 'failed', error: String(e) }); throw e; }
 }
-interface RecoveryOptions { config?: Config; connect?: (alias: string) => Rpc; approvalDigest?: string }
+interface RecoveryOptions { config?: Config; connect?: (alias: string) => Rpc; approvalDigest?: string; autoApprove?: boolean }
 function returnedCommand(reg: Registration) { console.log(`Returned to ${reg.cwd}\nbauble pi --session ${JSON.stringify(reg.sessionFile)}\nProfile: ${reg.profilePath}`); }
 export async function pull(id: string, approvalDigest?: string, store = new Store(), options: RecoveryOptions = {}) {
   const config = options.config ?? loadConfig(); const original = store.manifest(id); const alias = selectHost(config, original.manifest.destination); const root = config.hosts[alias]!.root;
   const route = beginReturn(store, id, alias, root); console.log(`Return recovery ID: ${route.reverseId}`);
-  const reg = await resumeReturn(store, route, (options.connect ?? ssh)(alias), reverseId => approve(store, reverseId, approvalDigest));
+  const reg = await resumeReturn(store, route, (options.connect ?? ssh)(alias), reverseId => approve(store, reverseId, approvalDigest, undefined, options.autoApprove));
   returnedCommand(reg); return reg;
 }
 export async function recover(id: string, cancel = false, store = new Store(), options: RecoveryOptions = {}) {
@@ -132,11 +140,16 @@ export async function recover(id: string, cancel = false, store = new Store(), o
     returnedCommand(reg); return reg;
   }
   const { manifest, digest } = store.manifest(id); const alias = selectHost(config, manifest.destination); const rpc = (options.connect ?? ssh)(alias); const root = config.hosts[alias]!.root;
+  if (manifest.native.session === null) {
+    if (cancel) { store.lock(manifest.lineageId, () => { invariant(!existsSync(join(store.transfer(id), 'dispatch.json')), 'Fresh dispatch authority exists; cannot cancel an ambiguous or active launch'); store.update(id, { phase: 'cancelled', ownership: 'revoked' }); }); console.log('Fresh job cancelled before authority; snapshots retained.'); return; }
+    if (!existsSync(join(store.transfer(id), 'approval.json'))) await approve(store, id, options.approvalDigest);
+    console.log(json(await dispatchTask(store, id, rpc, root))); return;
+  }
   if (cancel) {
     const owner = store.owner(manifest.lineageId);
     if (['captured', 'approved'].includes(store.status(id).phase) && owner.state === 'frozen' && owner.generation + 1 === manifest.generation && owner.transferId === id && owner.digest === digest) {
       store.lock(manifest.lineageId, () => { const current = store.owner(manifest.lineageId); invariant(current.state === 'frozen' && current.generation === owner.generation && current.transferId === id && current.digest === digest, 'Ownership changed'); store.update(id, { phase: 'cancelled', ownership: 'source' }); store.setOwner({ ...current, state: 'owned' }); });
-      const reg = store.registration(manifest.native.sessionId); if (processMatches(reg)) await control(reg.socket, { operation: 'unfreeze' });
+      const reg = store.registration(manifest.native.sessionId!); if (!reg.cleanShutdown && processMatches(reg)) await control(reg.socket, { operation: 'unfreeze' });
       console.log('Cancelled before authority was issued; source unfrozen.'); return;
     }
     await cancelTransfer(store, id, rpc, root); console.log('Positive destination revocation recorded. Source may be explicitly reopened after its old runtime exits.'); return;

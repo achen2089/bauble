@@ -23,7 +23,7 @@ export function beginReturn(store: Store, originalId: string, host: string, remo
     const existing = findReturn(store, originalId);
     if (existing) { invariant(existing.originalDigest === original.digest && existing.host === host && existing.remoteRoot === remoteRoot && existing.localRoot === store.root, 'Return routing changed'); return existing; }
     const owner = store.owner(original.manifest.lineageId);
-    invariant(owner.state === 'fenced' && owner.transferId === originalId && owner.digest === original.digest && owner.generation === original.manifest.generation, 'Original transfer no longer owns the local fence');
+    invariant((owner.state === 'fenced' || owner.state === 'dispatched') && owner.transferId === originalId && owner.digest === original.digest && owner.generation === original.manifest.generation, 'Original transfer no longer owns the local fence');
     const receipt = store.status(originalId).receipt;
     invariant(receipt && receipt.transferId === originalId && receipt.digest === original.digest && receipt.lineageId === original.manifest.lineageId && receipt.generation === original.manifest.generation, 'Destination readiness is not confirmed; recover the outbound transfer before pulling');
     const route = ReturnRoute.parse({ originalId, originalDigest: original.digest, reverseId: randomUUID(), host, remoteRoot, localRoot: store.root, reverseDigest: null });
@@ -55,7 +55,7 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     }
     const assertEligible = () => {
       const owner = store.owner(original.manifest.lineageId);
-      const prior = owner.state === 'fenced' && owner.transferId === route.originalId && owner.digest === route.originalDigest && owner.generation === original.manifest.generation;
+      const prior = (owner.state === 'fenced' || owner.state === 'dispatched') && owner.transferId === route.originalId && owner.digest === route.originalDigest && owner.generation === original.manifest.generation;
       const claimed = owner.state === 'owned' && owner.transferId === id && route.reverseDigest !== null && owner.digest === route.reverseDigest && owner.generation === original.manifest.generation + 1;
       invariant(prior || claimed, 'Return ownership changed; refusing stale release');
     };

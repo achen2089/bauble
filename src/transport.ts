@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { Alias } from './schema.js';
 import { invariant, json, removeFile } from './safe.js';
 const MAX_MESSAGE = 2 * 1024 * 1024;
-export const Request = z.object({ operation: z.enum(['probe', 'manifest', 'blob', 'ready', 'activate', 'status', 'revoke', 'attach', 'message-check', 'message', 'message-status', 'log', 'capture', 'fence', 'download', 'approve', 'finish']), root: z.string().max(4096), data: z.unknown() }).strict();
+export const Request = z.object({ operation: z.enum(['probe', 'configure-code-root', 'manifest', 'blob', 'ready', 'activate', 'status', 'revoke', 'attach', 'message-check', 'message', 'message-status', 'log', 'capture', 'fence', 'download', 'approve', 'finish']), root: z.string().max(4096), data: z.unknown() }).strict();
 export type Request = z.infer<typeof Request>;
 export type Rpc = (request: Request) => Promise<unknown>;
 export function ssh(alias: string): Rpc {

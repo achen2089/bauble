@@ -1,8 +1,8 @@
 # Bauble
 
-**Move a native Pi session to another machine—and bring it back.**
+**Run a fresh Pi task remotely—or move a native session there and bring it back.**
 
-Bauble checkpoints your conversation, Git workspace, and explicitly declared resources, then hands ownership to a Pi runtime over SSH. Attach to the existing remote terminal, send it an instruction, or pull the session back into a separate local workspace without overwriting your original checkout.
+Bauble launches an approved task with a snapshot of your Git repo or plain folder, without a local assistant bootstrap. It also checkpoints existing native conversations and explicitly declared resources for ownership handoff over SSH. Attach to the existing remote terminal, send it an instruction, or pull results into a separate local workspace without overwriting your original source.
 
 - **Keep context:** preserve native session history, branches, and supported compactions.
 - **Review before sending:** approve an inventory bound to the exact checkpoint and destination.
@@ -15,6 +15,7 @@ Bauble checkpoints your conversation, Git workspace, and explicitly declared res
 
 - [Install and configure](#install-and-configure)
 - [Bauble skill](#bauble-skill)
+- [Fresh remote tasks](#fresh-remote-tasks)
 - [Native Pi and transfer](#native-pi-and-transfer)
 - [Message the existing Pi](#message-the-existing-pi)
 - [Persistence and recovery](#persistence-and-recovery)
@@ -28,7 +29,7 @@ Bauble checkpoints your conversation, Git workspace, and explicitly declared res
 - Node.js **>=22.19.0** and Git on each machine.
 - The exact `@earendil-works/pi-{coding-agent,ai,tui}` **0.85.1** dependencies (installed by `npm ci`).
 - Linux and **tmux >=3.2** on remote destinations, reachable through configured SSH aliases.
-- Pi credentials configured independently on each machine.
+- Pi credentials configured independently on each execution machine (fresh remote tasks need no local inference credentials).
 
 ### Install
 
@@ -57,7 +58,7 @@ Create `~/.config/bauble/config.json` (or set `BAUBLE_CONFIG`). All paths must b
 }
 ```
 
-On the destination, its own `remoteRoot` must match that destination's configured storage. A remote profile with the same policy and ordered resource contents must already exist. Config/profile locations are not inferred from an unmanaged Pi runtime.
+On the destination, its own `remoteRoot` must match that destination's configured storage. A remote profile with the same policy and ordered resource contents must already exist. Existing configuration/profile locations are never inferred from an unmanaged Pi runtime. First local bootstrap is described below.
 
 Profile shape (the capitalized provider/model strings are placeholders to replace, **not defaults**):
 
@@ -81,11 +82,11 @@ Profile shape (the capitalized provider/model strings are placeholders to replac
 
 Resources are explicit files/directories relative to the profile file or absolute paths. Declare each skill's **complete directory**, including helper files. Unknown profile settings/extensions are rejected. Supported non-secret settings are compaction, retry, and image policy; see `src/schema.ts`. Executables are names on PATH; services declare `{ "name": "...", "host": "...", "port": 1234 }`. These are checked, never provisioned.
 
-Run `bauble setup <ssh-alias>` for each destination. The first successfully validated host becomes default; `--default` changes it. Hosts are interchangeable destinations, not a migration chain. Personal host selection is configuration data; this repository does not modify your personal configuration. State defaults to `~/.local/state/bauble`, or configured `localRoot`; `BAUBLE_STATE` overrides it for isolation.
+Run `bauble host add <ssh-alias>` (or `bauble setup <ssh-alias>`) for each destination. The first successfully validated host becomes default; `--default` changes it. Hosts are interchangeable destinations, not a migration chain. Personal host selection is configuration data; this repository does not modify your personal configuration. State defaults to `~/.local/state/bauble`, or configured `localRoot`; `BAUBLE_STATE` overrides it for isolation.
 
 ## Bauble skill
 
-The bundled [Bauble skill](skills/bauble/SKILL.md) teaches an agent how to select an explicit session, request an approved handoff, message an existing runtime, and handle recovery without replaying uncertain work. It is guidance—not a replacement for the CLI, host setup, or checkpoint approval.
+The bundled [Bauble skill](skills/bauble/SKILL.md) teaches an agent how to configure hosts, launch approved fresh tasks, select an explicit session for handoff, message an existing runtime, and recover without replaying uncertain work. It is guidance—not a replacement for the CLI, host setup, or checkpoint approval.
 
 For ordinary Pi sessions, copy the skill from this repository into your user skill directory (check for an existing directory or symlink first):
 
@@ -110,6 +111,51 @@ Configure the matching skill contents in the destination profile before launchin
 
 `/skill:bauble` loads agent guidance; `/bauble [host]` opens the native transfer approval dialog. Skill commands sent through `bauble message` or a continuation instruction remain literal text and are not expanded.
 
+## Fresh remote tasks
+
+After installing/configuring the destination independently, configure it once:
+
+```sh
+bauble host add my-server --default --profile /absolute/path/profile.json
+bauble host list
+bauble host default my-server
+# Optional: authorize an existing private code directory on this destination.
+bauble setup my-server --code-root /absolute/remote/code
+```
+
+`host add` runs the same compatibility/profile/credential/requirement checks as `setup`. An existing config and profile are retained. On the **first local configuration only**, `--profile` selects an explicit controlled profile; otherwise Bauble can seed a minimal builtins-only profile from ordinary `~/.pi/agent/settings.json`'s saved `defaultProvider`, `defaultModel`, and per-model/default thinking selection. All three must exist and match a supported pinned model/thinking level. It prints the complete effective profile and exclusions; it never adopts ambient packages/extensions, project settings, credentials, custom model overrides, skills, or instructions. No local agent session is created. For later `run --profile`, its effective digest must match the configured destination. There are no ad-hoc `--model` or `--thinking` flags.
+
+The destination must already have compatible Bauble, a matching controlled profile, and independently configured credentials. `host add` does not bootstrap a remote profile, install software, or replace remote configuration. `setup --code-root` (also accepted by `host add`) explicitly authorizes **only** that top-level remote config field, backs up the exact previous config to `config.json.<uuid>.bak`, and records it in the local host map. The path must already exist, be canonical, owned by the remote user, not group/world writable, outside a Git repository, and separate from home/state. No SSH/tmux config is edited. Existing top-level `remoteRoot` is preserved and discovered by the helper; hosts can have different state/code roots.
+
+```sh
+cd /path/to/project
+bauble run --task TASK.md --context CONTEXT.md --auto-approve
+bauble run /path/to/plain-folder --host my-server --prompt 'Review these files' --name audit
+bauble run --cwd /path/to/repo/subdir --task TASK.md --context docs --context notes.md --auto-approve
+bauble ls
+bauble open audit --here
+bauble message audit 'Continue with the tests' --request-id <uuid>
+bauble log audit --follow
+bauble pull audit                  # approve the exact result snapshot interactively
+bauble pull <job-id> --auto-approve # explicit approval of this captured result only
+```
+
+The workspace defaults to the current directory. A positional folder and `--cwd` are alternatives. Task/context paths resolve from the invoking directory, not from `--cwd`. Exactly one `--task` or `--prompt` is required. Task/context files are bounded literal UTF-8 without NUL; context directories include safe regular text files under the same exclusions, not symlinks. The combined literal instruction is limited to 1 MiB (large inventories can additionally hit the 2 MiB protocol bound). Explicit task/context snapshots are independently stored under the run's `inputs/`, separate from the writable workspace. Context contents are appended as literal JSON data with their snapshot paths. Markdown frontmatter, slash commands, shell-looking text, and hooks are **not executed or expanded by Bauble**. The model may of course act on an approved instruction through its ordinary tools; this is not a sandbox.
+
+`--auto-approve` is an explicit opt-in for **this immutable job's transfer and literal task execution**, not a general `--yes`, secret-validation bypass, or unsupported harness permission flag. The full inventory, digest, target/cwd mappings, effective profile, requirements, exclusions and exact task/context are printed before approval; `autoapproval.json` durably binds it to that job/digest/destination. Without it, a TTY and exact digest approval are required; non-TTY invocation refuses before any dispatch. The controlled native tools already run with the destination user's OS permissions. Use an independently isolated account/container for unattended untrusted work.
+
+Git mode transfers HEAD-reachable history plus the exact dirty index/worktree, without source stash/commit/reset or index writes. Unsupported/unborn Git repositories fail rather than falling back to folder mode. Nested cwd maps into the captured repository root and is displayed. **Plain folders do not require Git, create a commit, or manufacture HEAD.** They use full file inventories preserving bytes, executable bits and safe internal symlinks. `.gitignore` rules and state/dependency/ambient directories (`.git`, `node_modules`, `.pi`, `.agents`, `.config`, `.cache`, `.local`, `.ssh`, `.aws`, `.gnupg`, `.bauble`) are excluded without traversal. Likely secrets are excluded; credential filenames, escapes/chains, special files, traversal, non-UTF-8 and case-colliding paths are rejected. Explicit sensitive task/context files are rejected even with autoapproval. Canonical project paths are required; home/filesystem-root/state folders cannot be selected. Empty directories, ACLs, xattrs and timestamps are not preserved. Folder `--include-sensitive` is not supported. Quiesce external writers: capture and pre-dispatch consistency checks are not an atomic filesystem snapshot.
+
+A fresh task has its own lineage, immutable ID and dispatch intent, **no local Pi seed, transcript, registration, or source-session fence**. The destination claims launch intent before creating a genuine `SessionManager.create()` native session. Pi itself persists that session when its first assistant activity occurs; Bauble never fabricates an assistant response. Readiness is not task acceptance/completion; `run` returns once the helper reports readiness (or times out unknown), leaving the existing native Pi alive in tmux. A missing/failed readiness receipt exits nonzero. Inspect the terminal/log/native transcript to assess task results; idle never means success.
+
+Retain the printed UUID. Repeating `run` creates a **new task**, not a retry. `bauble recover <uuid>` resumes staging before dispatch intent, but after intent it performs **read-only status reconciliation**, even if activation was never sent. It never replays/restarts an ambiguous launch. `recover --cancel` cancels a fresh job only before dispatch authority exists; afterwards resolve the existing destination, do not delete ledgers. Partial preparation/unknown launches fail closed for manual investigation.
+
+`--name` is an optional safe ASCII handle (`letters/digits/_.-`, first character alphanumeric). UUIDs remain authoritative; duplicate names are allowed but name lookup rejects ambiguity. `ls` shows name/UUID/host/cwd/execution and actual tmux socket/target. Workspaces go under `<codeRoot>/<name>-<uuid>` (or `<codeRoot>/<uuid>`); without `codeRoot`, the existing state-root run layout is retained. Git object storage and native state stay in Bauble state. Each run has an isolated tmux server; ordinary `tmux ls` does **not** list them. `run` prints `tmux -L <socket> attach-session -t <target>` for the destination. Prefer `open <name-or-id> [--here]`, which verifies and attaches the same process, never starts another.
+
+`pull` supports both fresh Git and plain-folder results after real persisted native assistant activity and a settled/clean runtime. It captures the complete result inventory plus genuine native state, with fresh approval, into a **separate local Bauble-owned workspace**, never the original source. Missing files remain absent (no merge), and plain folders stay non-Git. It fences/closes the remote owner using the existing return protocol and prints an explicit local `bauble pi --session ...` command. No automatic merge, cleanup, publication or task-success claim occurs. Closing before Pi has persisted assistant activity cannot produce a native return checkpoint.
+
+**Lifecycle events, not executable hooks:** existing native event names (`agent_start`, `agent_end`, tool/message events) are retained in each destination transfer's `journal.jsonl`; `log` shows the native message log. This slice adds no hook configuration, callback scripts, or document-frontmatter execution. Claude Code and other backends remain future work.
+
 ## Native Pi and transfer
 
 ### Start locally
@@ -124,7 +170,7 @@ bauble pi
 bauble pi --session /absolute/path/to/session.jsonl
 ```
 
-Launch workflow: start a managed local Pi in a Git repository with a commit, do the initial work there, then use `/bauble <ssh-alias>` and approve the checkpoint. Remote-only start is unsupported; there is no `bauble start`. Do not fabricate a session or silently open an arbitrary transcript to create a remote runtime.
+Migration workflow: start a managed local Pi, do initial work there, then use `/bauble <ssh-alias>` and approve the checkpoint. For a genuinely fresh remote task use `bauble run` below; it does not require local assistant activity. There is no `bauble start` and no arbitrary transcript selection.
 
 This uses Pi's exported runtime, services and native terminal UI with an isolated resource loader. No ambient global/project/package extensions, instructions, skills, templates or settings are enabled. Startup catalog/update/telemetry network activity is disabled; approved inference remains available. Missing credentials, model fallback, unexpected tools or profile changes fail closed.
 
@@ -165,7 +211,7 @@ On macOS, `open` requests a new Terminal.app window using fixed AppleScript and 
 
 Missing, stale, frozen/fenced, returned, closed or non-tmux sessions fail closed. Missing/uncertain readiness requires `bauble recover <transfer-id>`; it is not permission to restart. To reopen a closed remote session, explicitly `pull`, then use the printed `bauble pi --session ...` command after confirmed local ownership. For returned/closed local sessions, explicitly reopen the verified registered path after the old runtime exits. `open` is not a general terminal launcher for bare JSONL or a non-tmux `bauble pi` session.
 
-Pull settles the destination, creates a new checkpoint in the same lineage, reconstructs a separate local private Git repository/worktree, fences the remote owner, then prints an explicit `bauble pi --session ...` command. It never modifies the original checkout/newer local edits or automatically sends another prompt.
+Pull settles the destination, creates a new checkpoint in the same lineage, reconstructs a separate local private Git repository/worktree or plain folder, fences the remote owner, then prints an explicit `bauble pi --session ...` command. It never modifies the original checkout/newer local edits or automatically sends another prompt.
 
 ## Message the existing Pi
 
@@ -250,3 +296,5 @@ Offline messaging tests use actual pinned native acceptance with a credential-fr
 Offline checks require local tmux for an isolated attachment fixture. Open regressions cover local/SSH routing, exact receipt/fence/process bindings, no launch or prompt replay, current-terminal requirements, headless errors, terminal subprocess revalidation, and hostile config/state path quoting. The macOS GUI launch is tested through an argv seam, not a live Terminal automation gate; live GUI/SSH `open` still needs validation on intended hosts.
 
 Offline tests use the real pinned Pi loader/context builder/runtime and real tools, preserving branch trees, compaction, tool history, labels/state, embedded attachments, artifact mappings, exact dirty index/worktree bytes and newer original-checkout edits. Protocol tests cover real continuation, duplicate activation and lost acknowledgments. Recovery regressions cover stale/cancelled transfers across two destinations, empty-destination staging, duplicate/failed capture, lost return capture/fence/finish acknowledgments, and injected interruption after capture, completed restoration, fencing, claim, registration, returned status and finish. They assert no additional runtime start, no prompt replay, preserved newer original-checkout edits, and fail-closed partial/changed restoration and stale ownership. These are bounded exception-injection tests, not exhaustive power-loss testing. The SSH gate exercises actual SSH, native Pi, two attach/detach cycles with identical process receipt/tmux target, duplicate start prevention, outbound acknowledgment recovery and interrupted-return fence acknowledgment recovery through the shared recovery implementation. It verifies exactly one literal native continuation and successful write-tool result, clean local return registration, restart-persistent leaf, and idempotent completion. Fixtures are unique and retained for investigation; no user sessions are used. Exhaustive crash-transition and native TUI shortcut testing remain outstanding; offline results do not certify live host behavior.
+
+Fresh-run regressions use the public non-TTY CLI through an isolated SSH argv seam, a real native Pi/tmux process and deterministic write tool, plus direct helper tests for exact dirty Git/plain-folder returns, no local seed, literal snapshots, source consistency, explicit codeRoot config backup, names/default hosts, messages/open, and lost/pre-send launch acknowledgments without replay. The probe is fixture-controlled; these are **not live Linux SSH acceptance results**.

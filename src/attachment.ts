@@ -1,3 +1,5 @@
+import { loadConfig } from './config.js';
+import { targetRepository } from './targets.js';
 import { z } from 'zod';
 import { join, resolve } from 'node:path';
 import { Store } from './store.js';
@@ -30,7 +32,7 @@ export interface AttachmentChecks { processMatches: typeof processMatches; contr
 export async function verifyLocalAttachment(store: Store, id: string, expected?: Receipt, checks: AttachmentChecks = { processMatches, control, run }) {
   const { manifest, status, owner, receipt } = attachmentBinding(store, id);
   invariant(owner.state === 'owned' && status.ownership === 'destination' && status.phase === 'active', `Local runtime is fenced, frozen or not active; ${reopenGuidance}`);
-  invariant(manifest.target.repository === join(resolve(store.root), 'runs', id, 'workspace', 'worktree'), 'Local destination storage binding mismatch');
+  invariant(manifest.target.repository === targetRepository(manifest, store.root, manifest.codeRoot ? loadConfig().codeRoot : undefined), 'Local destination storage binding mismatch');
   invariant(!['exited', 'failed'].includes(status.execution), `Runtime is closed or failed; ${reopenGuidance}`);
   if (expected) sameReceipt(receipt, expected);
   let reg: Registration;

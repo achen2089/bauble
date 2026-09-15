@@ -1,3 +1,4 @@
+import { targetRepository } from './targets.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -50,7 +51,7 @@ export function messageStatusLocal(store: Store, raw: unknown): MessageResult {
 export function messageRuntimeBinding(store: Store, receipt: Receipt) {
   const bound = attachmentBinding(store, receipt.transferId); sameReceipt(bound.receipt, receipt);
   invariant(bound.owner.state === 'owned' && bound.status.phase === 'active' && bound.status.ownership === 'destination', 'Message destination is not the active owner (frozen/fenced/stale)');
-  invariant(bound.manifest.target.repository === join(resolve(store.root), 'runs', receipt.transferId, 'workspace', 'worktree'), 'Message destination storage changed');
+  invariant(bound.manifest.target.repository === targetRepository(bound.manifest, store.root, bound.manifest.codeRoot ? loadConfig().codeRoot : undefined), 'Message destination storage changed');
   invariant(!['exited', 'failed'].includes(bound.status.execution), 'Message runtime is closed or failed; no restart');
   let reg: Registration;
   try { reg = store.registration(receipt.sessionId); } catch { throw new Error(`Missing or ambiguous message runtime registration; run bauble recover ${receipt.transferId}; no launch`); }
@@ -140,9 +141,9 @@ interface MessageOptions { config?: Config; connect?: (alias: string) => Rpc; on
 function routeMessage(store: Store, id: string, config: Config) {
   const binding = attachmentBinding(store, Id.parse(id));
   if (binding.owner.state === 'owned' && binding.status.ownership === 'destination') return { alias: null, root: resolve(store.root), receipt: binding.receipt };
-  invariant(binding.owner.state === 'fenced' && binding.status.ownership === 'fenced', 'No exact message owner or outbound fence');
+  invariant((binding.owner.state === 'fenced' || binding.owner.state === 'dispatched') && binding.status.ownership === 'fenced', 'No exact message owner or outbound fence');
   const alias = Alias.parse(binding.manifest.destination); const host = config.hosts[alias];
-  invariant(host && binding.manifest.target.repository === join(resolve(host.root), 'runs', id, 'workspace', 'worktree'), 'Message destination SSH configuration/root changed');
+  invariant(host && binding.manifest.target.repository === targetRepository(binding.manifest, host.root, host.codeRoot), 'Message destination SSH configuration/root changed');
   return { alias, root: resolve(host.root), receipt: binding.receipt };
 }
 function rpcFor(dispatch: Pick<Dispatch, 'alias' | 'root' | 'receipt'>, options: MessageOptions, store: Store): Rpc {

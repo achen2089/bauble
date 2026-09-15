@@ -35,3 +35,15 @@ export async function checkRequirements(profile: Profile) {
   for (const executable of profile.executables) run('which', [executable]);
   for (const service of profile.services) await new Promise<void>((ok, fail) => { const socket = connect(service.port, service.host); socket.setTimeout(3000); socket.once('connect', () => { socket.destroy(); ok(); }); socket.once('error', fail); socket.once('timeout', () => { socket.destroy(); fail(new Error(`Required service unavailable: ${service.name}`)); }); });
 }
+
+/** Validate catalog selection without constructing a session or importing ambient runtime resources. */
+export async function validateModel(profile: Profile, root: string, requireAuth = false) {
+  if (profile.testOnly) { invariant(profile.provider === 'bauble-fixture' && profile.model === 'deterministic', 'Invalid fixture model'); return; }
+  const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
+  const { homedir } = await import('node:os');
+  const { InMemoryCredentialStore, getSupportedThinkingLevels } = await import('@earendil-works/pi-ai');
+  const runtime = await ModelRuntime.create({ allowModelNetwork: false, modelsPath: join(root, 'no-model-overrides.json'), modelsStorePath: join(root, 'profile-agent', 'models-store.json'), ...(requireAuth ? { authPath: join(homedir(), '.pi/agent/auth.json') } : { credentials: new InMemoryCredentialStore() }) });
+  const model = runtime.getModel(profile.provider, profile.model); invariant(model, `Unknown pinned model: ${profile.provider}/${profile.model}; fallback forbidden`);
+  invariant(getSupportedThinkingLevels(model).includes(profile.thinking), `Unsupported thinking level ${profile.thinking} for ${profile.provider}/${profile.model}`);
+  if (requireAuth) invariant(await runtime.checkAuth(profile.provider), `Configure ${profile.provider} credentials independently on destination`);
+}

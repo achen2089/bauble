@@ -1,3 +1,4 @@
+import { configureCodeRoot, validateCodeRoot } from './hosts.js';
 import { z } from 'zod';
 import { existsSync, closeSync, fsyncSync, openSync, writeSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -7,8 +8,10 @@ import { Digest, Id, Manifest, Restoration, Status, type Config } from './schema
 import { atomicWrite, hash, invariant, json, privateDir, readBytes, readJson, run, syncTree, withAsyncLock } from './safe.js';
 import { validateCheckpoint, verifySource, captureOffline } from './checkpoint.js';
 import { CHUNK, control, type Rpc, type Request } from './transport.js';
-import { readProfile, snapshotProfile, materializeProfile, checkRequirements } from './pi/profile.js';
+import { readProfile, snapshotProfile, materializeProfile, checkRequirements, validateModel } from './pi/profile.js';
 import { inventory, restoreWorkspace } from './workspace.js';
+import { prepareFresh } from './fresh.js';
+import { targetRepository } from './targets.js';
 import { restoreNative } from './pi/native.js';
 import { processMatches } from './pi/runtime.js';
 import { verifyLocalAttachment } from './attachment.js';
@@ -86,30 +89,32 @@ export async function cancelTransfer(store: Store, id: string, rpc: Rpc, root: s
     store.update(id, { phase: 'cancelled', ownership: 'source', execution: 'unknown' });
     store.setOwner({ ...owner, state: 'owned' });
   });
-  const reg = store.registration(manifest.native.sessionId);
+  invariant(manifest.native.sessionId, 'Fresh task has no source session'); const reg = store.registration(manifest.native.sessionId);
   store.register({ ...reg, generation: store.owner(manifest.lineageId).generation });
-  if (processMatches(reg)) await control(reg.socket, { operation: 'finish', id });
+  if (!reg.cleanShutdown && processMatches(reg)) await control(reg.socket, { operation: 'finish', id });
 }
 function bound(store: Store, data: unknown) { const value = z.object({ id: Id, digest: Digest }).strict().parse(data); invariant(store.manifest(value.id).digest === value.digest, 'Manifest binding mismatch'); return value; }
 export interface HelperOptions { config: Config; allowFixture?: boolean; launch?: (store: Store, id: string) => Promise<void> }
 export async function handleRequest(request: Request, options: HelperOptions): Promise<unknown> {
-  const root = resolve(request.root); const configured = resolve(options.config.remoteRoot);
+  const root = ['probe', 'configure-code-root'].includes(request.operation) && request.root === '' ? resolve(options.config.remoteRoot) : resolve(request.root); const configured = resolve(options.config.remoteRoot);
   const fixture = options.allowFixture && root.startsWith(join(configured, 'fixtures') + '/') && Id.safeParse(root.slice(join(configured, 'fixtures').length + 1)).success;
   invariant(root === configured || fixture, 'Remote root must match configured storage or an explicitly authorized UUID fixture');
   const store = new Store(root);
   switch (request.operation) {
+    case 'configure-code-root': { const data = z.object({ codeRoot: z.string().max(4096) }).strict().parse(request.data); return configureCodeRoot(data.codeRoot); }
     case 'probe': {
+      if (options.config.codeRoot) validateCodeRoot(options.config.codeRoot, root);
       invariant(process.platform === 'linux', 'Remote host must be Linux');
       const node = process.versions.node.split('.').map(Number); invariant(node[0]! > 22 || (node[0] === 22 && node[1]! >= 19), 'Node >=22.19.0 required');
       run('git', ['--version']); const tmux = run('tmux', ['-V']).toString(); const match = /tmux (\d+)\.(\d+)/.exec(tmux); invariant(match && (+match[1]! > 3 || (+match[1]! === 3 && +match[2]! >= 2)), 'tmux >=3.2 required');
-      const profile = readProfile(options.config.profile); await checkRequirements(profile);
-      return { protocol: 1, version: '0.1.0', piVersion: '0.85.1', node: process.versions.node, tmux: tmux.trim(), root, profileDigest: snapshotProfile(profile, dirname(options.config.profile), store.blobs).digest };
+      const profile = readProfile(options.config.profile); await checkRequirements(profile); await validateModel(profile, root, true);
+      return { protocol: 1, version: '0.1.0', piVersion: '0.85.1', node: process.versions.node, tmux: tmux.trim(), root, codeRoot: options.config.codeRoot, profileDigest: snapshotProfile(profile, dirname(options.config.profile), store.blobs).digest };
     }
     case 'manifest': {
       const data = z.object({ manifest: Manifest, digest: Digest }).strict().parse(request.data);
       invariant(hash(json(data.manifest)) === data.digest, 'Corrupt manifest');
       invariant(data.manifest.native.profile.testOnly ? fixture : true, 'Test profile forbidden outside isolated fixture root');
-      const expected = join(root, 'runs', data.manifest.transferId, 'workspace', 'worktree'); invariant(data.manifest.target.repository === expected, 'Target path not Bauble-owned transfer root');
+      const expected = targetRepository(data.manifest, root, options.config.codeRoot); invariant(data.manifest.target.repository === expected, 'Target path not Bauble-owned transfer root');
       const digest = store.putManifest(data.manifest, 'staging'); return { digest, missing: data.manifest.blobs.filter(b => !store.blobs.has(b.hash)).map(b => b.hash) };
     }
     case 'blob': {
@@ -127,13 +132,17 @@ export async function handleRequest(request: Request, options: HelperOptions): P
     }
     case 'ready': {
       const { id, digest } = bound(store, request.data); const manifest = validateCheckpoint(store, id);
-      if (!manifest.native.profile.testOnly) { const profile = readProfile(options.config.profile); invariant(snapshotProfile(profile, dirname(options.config.profile), store.blobs).digest === manifest.native.profileDigest, 'Destination profile mismatch'); await checkRequirements(profile); }
+      invariant(manifest.target.repository === targetRepository(manifest, root, options.config.codeRoot), 'Destination authorization changed');
+      if (manifest.codeRoot) validateCodeRoot(manifest.codeRoot, root);
+      if (!manifest.native.profile.testOnly) { const profile = readProfile(options.config.profile); invariant(snapshotProfile(profile, dirname(options.config.profile), store.blobs).digest === manifest.native.profileDigest, 'Destination profile mismatch'); await checkRequirements(profile); await validateModel(profile, root, true); }
       invariant(store.status(id).phase !== 'cancelled', 'Transfer revoked');
       if (store.status(id).phase === 'staging') store.update(id, { phase: 'ready' });
       return { ready: true, digest };
     }
     case 'activate': {
-      const { id } = bound(store, request.data);
+      const { id } = bound(store, request.data); const manifest = store.manifest(id).manifest;
+      invariant(manifest.target.repository === targetRepository(manifest, root, options.config.codeRoot), 'Destination authorization changed');
+      if (manifest.codeRoot) validateCodeRoot(manifest.codeRoot, root);
       if (store.claim(id)) {
         try { await (options.launch ?? launchTmux)(store, id); }
         catch (e) { store.update(id, { phase: 'unknown', execution: 'unknown', error: String(e) }); throw e; }
@@ -169,18 +178,18 @@ export async function handleRequest(request: Request, options: HelperOptions): P
         const receipt = store.status(data.id).receipt; invariant(receipt, 'No runtime receipt to pull');
         const reg = store.registration(receipt.sessionId);
         invariant(reg.parentTransfer === data.id && reg.lineageId === original.manifest.lineageId && reg.generation === original.manifest.generation, 'Return registration generation/binding mismatch');
-        if (processMatches(reg)) return control(reg.socket, { operation: 'capture', destination: data.destination, targetRoot: intent.targetRoot, instruction: null, id: intent.returnId });
+        if (!reg.cleanShutdown && processMatches(reg)) return control(reg.socket, { operation: 'capture', destination: data.destination, targetRoot: intent.targetRoot, instruction: null, id: intent.returnId });
         return captureOffline({ store, registration: reg, destination: data.destination, targetRoot: intent.targetRoot, transferId: intent.returnId });
       });
     }
     case 'approve': { const { id, digest } = bound(store, request.data); store.approve(id, digest); return { approved: true }; }
     case 'fence': { const { id } = bound(store, request.data); verifySource(store, id); store.fence(id); const { manifest, digest } = store.manifest(id); return { fenced: true, transferId: id, digest, lineageId: manifest.lineageId, generation: manifest.generation }; }
-    case 'finish': { const { id } = bound(store, request.data); const manifest = store.manifest(id).manifest; const reg = store.registration(manifest.native.sessionId); if (processMatches(reg)) await control(reg.socket, { operation: 'finish', id }); return { finished: true }; }
+    case 'finish': { const { id } = bound(store, request.data); const manifest = store.manifest(id).manifest; invariant(manifest.native.sessionId, 'Fresh task has no source session'); const reg = store.registration(manifest.native.sessionId); if (!reg.cleanShutdown && processMatches(reg)) await control(reg.socket, { operation: 'finish', id }); return { finished: true }; }
   }
 }
 export function prepareRestore(store: Store, id: string) {
   return store.lock(id, () => {
-    const manifest = validateCheckpoint(store, id); const { digest } = store.manifest(id);
+    const manifest = validateCheckpoint(store, id); invariant(manifest.native.session !== null, 'Use fresh preparation for new tasks'); const { digest } = store.manifest(id);
     const root = join(store.root, 'runs', id); const receiptPath = join(root, 'restoration.json');
     if (existsSync(receiptPath)) {
       const receipt = readJson(receiptPath, Restoration); const restored = receipt.restored;
@@ -200,7 +209,7 @@ export function prepareRestore(store: Store, id: string) {
     const workspace = restoreWorkspace(manifest.workspace, store.blobs, join(root, 'workspace'));
     invariant(workspace === manifest.target.repository, 'Restoration target mismatch');
     const cwd = resolve(manifest.target.cwd); invariant(existsSync(cwd), 'Target cwd missing from approved inventory');
-    const native = restoreNative(manifest.native, store.blobs, cwd, join(root, 'native'), id);
+    const native = restoreNative({ ...manifest.native, sessionId: manifest.native.sessionId!, leaf: manifest.native.leaf!, session: manifest.native.session!, runtimeSignature: manifest.native.runtimeSignature! }, store.blobs, cwd, join(root, 'native'), id);
     const profile = materializeProfile(manifest.native.profile, manifest.native.resources, store.blobs, join(root, 'resources'));
     const profilePath = join(root, 'profile.json'); atomicWrite(profilePath, json(profile));
     const restored = { sessionId: native.manager.getSessionId(), sessionFile: native.file, leaf: native.restoredLeaf, cwd, profilePath };
@@ -212,7 +221,7 @@ export function prepareRestore(store: Store, id: string) {
 }
 export async function launchTmux(store: Store, id: string) {
   const manifest = store.manifest(id).manifest; const token = `b${id.replaceAll('-', '')}`;
-  prepareRestore(store, id);
+  if (manifest.native.session === null) prepareFresh(store, id); else prepareRestore(store, id);
   // Multiple command arguments instruct tmux to exec argv directly, not a shell command string.
   run('tmux', ['-L', token, '-f', '/dev/null', 'new-session', '-d', '-s', token, 'bauble', '_runtime', id, '--root', store.root]);
   // Readiness is a durable native receipt, never process presence or screen scraping.

@@ -9,6 +9,8 @@ export function loadConfig(): Config {
   invariant(existsSync(configPath()), `Create ${configPath()} with a controlled profile and storage roots before setup; see README`);
   const c = readJson(configPath(), Config);
   invariant(isAbsolute(c.profile) && isAbsolute(c.localRoot) && isAbsolute(c.remoteRoot), 'Configuration paths must be absolute');
+  invariant(!c.codeRoot || isAbsolute(c.codeRoot), 'codeRoot must be absolute');
+  for (const host of Object.values(c.hosts)) invariant(isAbsolute(host.root) && (!host.codeRoot || isAbsolute(host.codeRoot)), 'Host storage/code roots must be absolute');
   if (c.defaultHost) invariant(c.hosts[c.defaultHost], 'Default host is not configured');
   return c;
 }

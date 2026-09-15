@@ -1,3 +1,4 @@
+import { targetRepository } from './targets.js';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -28,15 +29,15 @@ export async function resolveAttachment(id: string, store: Store, options: OpenO
     await (options.verify ?? verifyLocalAttachment)(store, id, receipt);
     return { ticket: { id, digest, root: resolve(store.root), receipt }, alias: null };
   }
-  invariant(owner.state === 'fenced' && status.ownership === 'fenced', `No exact local owner or outbound fence for attachment; ${reopenGuidance}`);
+  invariant((owner.state === 'fenced' || owner.state === 'dispatched') && status.ownership === 'fenced', `No exact local owner or outbound fence for attachment; ${reopenGuidance}`);
   const config = options.config ?? loadConfig(); const alias = Alias.parse(manifest.destination); const host = config.hosts[alias];
   invariant(host, `Unconfigured destination ${alias}; use the destination's own bauble open ${id} --here or configure this SSH alias`);
-  invariant(manifest.target.repository === join(resolve(host.root), 'runs', id, 'workspace', 'worktree'), 'Configured remote storage no longer matches this transfer');
+  invariant(manifest.target.repository === targetRepository(manifest, host.root, host.codeRoot), 'Configured remote storage no longer matches this transfer');
   const remote = Receipt.parse(await (options.connect ?? ssh)(alias)({ operation: 'attach', root: host.root, data: { id, digest } }));
   sameReceipt(remote, receipt);
   // A concurrent return/fence change while the helper ran must not become a new route.
   const current = attachmentBinding(store, id);
-  invariant(current.owner.state === 'fenced' && current.status.ownership === 'fenced', 'Ownership changed during remote attachment');
+  invariant((current.owner.state === 'fenced' || current.owner.state === 'dispatched') && current.status.ownership === 'fenced', 'Ownership changed during remote attachment');
   sameReceipt(current.receipt, receipt);
   return { ticket: { id, digest, root: resolve(store.root), receipt }, alias };
 }

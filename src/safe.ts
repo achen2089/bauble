@@ -32,8 +32,10 @@ export function safePath(path: string) {
   return path;
 }
 export function validatePaths(paths: string[]) {
-  const seen = new Set<string>();
-  for (const path of paths) { safePath(path); const key = path.normalize('NFC').toLowerCase(); invariant(!seen.has(key), `Duplicate/case-colliding path: ${path}`); seen.add(key); }
+  const seen = new Set<string>(); const spellings = new Map<string, string>();
+  for (const path of paths) { safePath(path);
+    const parts = path.split('/'); for (let i = 1; i <= parts.length; i++) { const spelling = parts.slice(0, i).join('/'); const normalized = spelling.normalize('NFC').toLowerCase(); invariant(!spellings.has(normalized) || spellings.get(normalized) === spelling, `Case-colliding path component: ${path}`); spellings.set(normalized, spelling); }
+    const key = path.normalize('NFC').toLowerCase(); invariant(!seen.has(key), `Duplicate/case-colliding path: ${path}`); seen.add(key); }
   for (const path of seen) { let parent = posix.dirname(path); while (parent !== '.') { invariant(!seen.has(parent), `File/directory collision: ${path}`); parent = posix.dirname(parent); } }
 }
 export function safeLink(path: string, target: string) {

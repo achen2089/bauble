@@ -1,0 +1,13 @@
+// Isolated SSH argv seam; never connects to a host or opens a user session.
+import { readFileSync } from 'node:fs';
+import { Request, readMessage } from '../src/transport.js';
+import { handleRequest } from '../src/protocol.js';
+import { Config } from '../src/schema.js';
+import { json } from '../src/safe.js';
+const request = Request.parse(await readMessage(process.stdin));
+process.env.BAUBLE_CONFIG = process.env.BAUBLE_TEST_REMOTE_CONFIG!;
+const config = Config.parse(JSON.parse(readFileSync(process.env.BAUBLE_CONFIG, 'utf8')));
+try {
+  const data = request.operation === 'probe' ? { protocol: 1, version: '0.1.0', piVersion: '0.85.1', root: process.env.BAUBLE_TEST_REMOTE_ROOT, codeRoot: config.codeRoot, profileDigest: process.env.BAUBLE_TEST_PROFILE_DIGEST } : await handleRequest(request, { config, allowFixture: true });
+  process.stdout.write(json({ ok: true, data }));
+} catch (error) { process.stderr.write(String(error)); process.exitCode = 1; }
