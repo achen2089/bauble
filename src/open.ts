@@ -1,4 +1,5 @@
 import { CliError } from './errors.js';
+import { rpcScope } from './stream.js';
 import { targetRepository } from './targets.js';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -91,11 +92,15 @@ export async function openSession(id: string, here = false, store = new Store(),
     return { windowRequested: true as const };
   }
 }
-export async function terminalOpen(encoded: string) {
+export async function terminalOpen(encoded: string, signal?: AbortSignal) {
   invariant(process.stdin.isTTY && process.stdout.isTTY, 'Terminal attachment requires an interactive terminal');
   const value = OpenTicket.parse(decodeTicket(encoded));
   invariant(resolve(new Store().root) === value.ticket.root, 'Terminal state selection changed');
-  await attachResolved(value, new Store(value.ticket.root));
+  const scope = rpcScope(ssh); const abort = () => scope.close();
+  signal?.addEventListener('abort', abort, { once: true });
+  process.once('SIGHUP', abort);
+  try { if (signal?.aborted) abort(); await attachResolved(value, new Store(value.ticket.root), { connect: scope.connect }); }
+  finally { signal?.removeEventListener('abort', abort); process.removeListener('SIGHUP', abort); scope.close(); }
 }
 export async function remoteAttach(encoded: string) {
   invariant(process.stdin.isTTY && process.stdout.isTTY, 'Remote attachment requires an interactive terminal');

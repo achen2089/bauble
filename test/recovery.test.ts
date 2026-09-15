@@ -153,6 +153,18 @@ for (const lost of ['capture', 'fence'] as const) test(`return recovery: lost ${
         const observed = spawnSync(process.execPath, [resolve('dist/src/cli.js'), 'status', route.reverseId, '--json'], { env: process.env, encoding: 'utf8' });
         assert.equal(observed.status, 0, observed.stderr); const data = JSON.parse(observed.stdout).data;
         assert.equal(data.observation, 'return-route'); assert.equal(data.reverseId, route.reverseId); assert.equal(data.phase, 'unknown');
+        assert.equal(findReturn(f.store, route.reverseId)!.reverseDigest, null);
+        const beforeRoute = findReturn(f.store, route.reverseId); const beforeOwner = f.remote.owner(f.captured.manifest.lineageId);
+        const bin = join(f.root, 'bin'); mkdirSync(bin); const admission = join(f.root, 'incompatible-admission');
+        writeFileSync(join(bin, 'ssh'), `#!/bin/sh\nexec '${process.execPath}' '${resolve('dist/test/stream-process.js')}' incompatible '${admission}'\n`, { mode: 0o700 });
+        const rejected = spawnSync(process.execPath, [resolve('dist/src/cli.js'), 'recover', route.reverseId, '--json'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', timeout: 8000 });
+        assert.equal(rejected.status, 4, rejected.stderr); const uncertainty = JSON.parse(rejected.stdout);
+        assert.equal(uncertainty.error.code, 'RETURN_UNCERTAIN'); assert.equal(uncertainty.data.cause.code, 'STREAM_CAPABILITY');
+        assert.match(uncertainty.error.hint, /Install Bauble 0\.2\.0 on both ends/); assert.match(uncertainty.error.hint, /never recapture/);
+        assert.match(uncertainty.error.message, /before operation admission; earlier capture or authority cannot be ruled out/);
+        assert.equal(uncertainty.data.reverseId, route.reverseId); assert.equal(uncertainty.data.originalId, route.originalId);
+        assert.deepEqual(findReturn(f.store, route.reverseId), beforeRoute); assert.deepEqual(f.remote.owner(f.captured.manifest.lineageId), beforeOwner);
+        assert.equal(existsSync(admission), false, 'Incompatible current connection must admit no capture or mutation');
       }
       let connections = 0; let closed = 0; const captureIds: string[] = [];
       const result = await execute(parseCommand(['recover', route.reverseId, '--approval-digest', f.remote.manifest(route.reverseId).digest, '--json']), { connect: () => { connections++; return Object.assign(async (request: Parameters<Rpc>[0]) => { if (request.operation === 'capture') captureIds.push((request.data as { returnId: string }).returnId); return f.rpc(request); }, { close() { closed++; } }); } });

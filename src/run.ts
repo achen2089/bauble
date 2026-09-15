@@ -12,7 +12,7 @@ import { readProfile, snapshotProfile, validateModel } from './pi/profile.js';
 import { validateCheckpoint } from './checkpoint.js';
 import { approve, prepared } from './approval.js';
 import type { OperationContext } from './output.js';
-import { CliError } from './errors.js';
+import { CliError, withStreamCapability } from './errors.js';
 import { stage } from './protocol.js';
 import { ssh, type Rpc } from './transport.js';
 
@@ -67,7 +67,7 @@ export async function dispatchTask(store: Store, id: string, rpc: Rpc, root: str
       invariant(readBytes(intentPath).toString() === json({ id, digest, root, host: manifest.destination }), 'Fresh dispatch route changed');
       const owner = store.owner(manifest.lineageId); invariant(owner.state === 'dispatched' && owner.transferId === id && owner.digest === digest && owner.generation === manifest.generation, 'Fresh dispatch authority changed or incomplete; inspect existing ledger, never replay');
       let observation: unknown;
-      try { observation = await rpc({ operation: 'status', root, data: { id, digest } }); } catch { throw new CliError('AUTHORITY_UNCERTAIN', 'Existing dispatch authority could not be reconciled.', 'uncertain', 'Recover the same ID; never replay run.', { transferId: id, digest }); }
+      try { observation = await rpc({ operation: 'status', root, data: { id, digest } }); } catch (error) { throw withStreamCapability(error, new CliError('AUTHORITY_UNCERTAIN', 'Existing dispatch authority could not be reconciled.', 'uncertain', 'Recover the same ID; never replay run.', { transferId: id, digest })); }
       return record(Status.parse(observation));
     }
     verifyTaskSource(store, id); await stage(store, id, rpc, root, context); verifyTaskSource(store, id);
@@ -76,7 +76,7 @@ export async function dispatchTask(store: Store, id: string, rpc: Rpc, root: str
     store.setOwner({ lineageId: manifest.lineageId, generation: 1, transferId: id, digest, state: 'dispatched' });
     store.update(id, { phase: 'launch_intent', ownership: 'fenced', execution: 'starting' });
     try { return record(Status.parse(await rpc({ operation: 'activate', root, data: { id, digest } }))); }
-    catch (error) { store.update(id, { phase: 'unknown', execution: 'unknown', error: String(error) }); throw new CliError('AUTHORITY_UNCERTAIN', 'Fresh dispatch authority is durable; activation acknowledgment was lost.', 'uncertain', 'Recover the exact ID; never repeat run.', { transferId: id, digest }); }
+    catch (error) { store.update(id, { phase: 'unknown', execution: 'unknown', error: String(error) }); throw withStreamCapability(error, new CliError('AUTHORITY_UNCERTAIN', 'Fresh dispatch authority is durable; activation acknowledgment was lost.', 'uncertain', 'Recover the exact ID; never repeat run.', { transferId: id, digest })); }
     function record(status: Status) {
       invariant(status.transferId === id && status.digest === digest, 'Fresh status binding mismatch');
       if (status.receipt) { const r = status.receipt; invariant(r.lineageId === manifest.lineageId && r.generation === 1 && r.transferId === id && r.digest === digest, 'Fresh receipt mismatch'); }

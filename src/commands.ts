@@ -3,7 +3,7 @@ import { recordCaptureIntent } from './capture-intent.js';
 import { rpcScope } from './stream.js';
 import { VERSION, PI_VERSION } from './metadata.js';
 import { approve, prepared } from './approval.js';
-import type { OperationContext } from './output.js';
+import { action, type OperationContext } from './output.js';
 import { CliError } from './errors.js';
 import { prepareFresh } from './fresh.js';
 import { dispatchTask } from './run.js';
@@ -16,7 +16,7 @@ import { Config, Manifest, Registration, Alias, Id } from './schema.js';
 import { loadConfig, saveConfig, selectHost } from './config.js';
 import { captureCheckpoint, captureOffline } from './checkpoint.js';
 import { sendCheckpoint, cancelTransfer, recoverOutbound } from './protocol.js';
-import { control, controlServer, ssh, type Rpc } from './transport.js';
+import { control, controlServer, ControlChannelError, ssh, type Rpc } from './transport.js';
 import { atomicWrite, hash, invariant, json, readBytes, readJson, removeFile } from './safe.js';
 import type { Managed } from './pi/runtime.js';
 import { processIdentity, processMatches } from './process.js';
@@ -39,7 +39,13 @@ export async function setup(alias: string, makeDefault: boolean, codeRoot?: stri
 export async function captureSelected(store: Store, selected: string, destination: string, targetRoot: string, instruction?: string, sensitive?: string[], history?: string[], transferId?: string, expectedRegistration?: Registration) {
   const reg = store.registration(selected);
   if (expectedRegistration) invariant(json(reg) === json(expectedRegistration), 'Source registration changed before capture');
-  if (!reg.cleanShutdown && processMatches(reg)) return z.object({ manifest: Manifest, digest: z.string(), checkpoint: z.string() }).parse(await control(reg.socket, { operation: 'capture', destination, targetRoot, instruction: instruction ?? null, sensitive, history, id: transferId }));
+  if (!reg.cleanShutdown && processMatches(reg)) {
+    try { return z.object({ manifest: Manifest, digest: z.string(), checkpoint: z.string() }).parse(await control(reg.socket, { operation: 'capture', destination, targetRoot, instruction: instruction ?? null, sensitive, history, id: transferId })); }
+    catch (error) {
+      if (error instanceof ControlChannelError && error.admissionPossible && transferId) throw new CliError('CAPTURE_UNCERTAIN', 'Capture acknowledgment is unavailable; the source may remain frozen.', 'uncertain', 'Observe the exact capture intent and checkpoint; never recapture or unfreeze to bypass uncertainty.', { transferId, checkpoint: store.transfer(transferId), capture: 'intent' }, [action('Observe exact capture evidence', 'read', 'status', transferId)]);
+      throw error;
+    }
+  }
   return captureOffline({ store, registration: reg, destination, targetRoot, instruction, sensitive, history, transferId });
 }
 export async function send(options: { session?: string; checkpoint?: string; host?: string; instructionFile?: string; approvalDigest?: string; sensitive?: string[]; history?: string[]; prepare?: boolean }, store = new Store(), dialog?: (text: string) => Promise<boolean>, context: OperationContext = {}, connect: (alias: string) => Rpc = ssh) {

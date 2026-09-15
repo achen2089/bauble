@@ -1,5 +1,5 @@
 import type { OperationContext } from './output.js';
-import { CliError } from './errors.js';
+import { CliError, withStreamCapability } from './errors.js';
 import { z } from 'zod';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -56,7 +56,7 @@ async function reconcileFenced(store: Store, id: string, rpc: Rpc, root: string,
     assertSourceBinding(store, id, 'fenced');
     if (query) {
       let observation: unknown;
-      try { observation = await rpc({ operation: 'status', root, data: { id, digest } }); } catch { throw new CliError('AUTHORITY_UNCERTAIN', 'The fenced transfer could not be reconciled.', 'uncertain', 'Recover the same ID; never recapture.', { transferId: id, digest }); }
+      try { observation = await rpc({ operation: 'status', root, data: { id, digest } }); } catch (error) { throw withStreamCapability(error, new CliError('AUTHORITY_UNCERTAIN', 'The fenced transfer could not be reconciled.', 'uncertain', 'Recover the same ID; never recapture.', { transferId: id, digest })); }
       const status = Status.parse(observation);
       invariant(status.transferId === id && status.digest === digest, 'Remote status binding mismatch');
       if (status.receipt || status.phase !== 'ready') return recordRemoteStatus(store, id, status);
@@ -64,7 +64,7 @@ async function reconcileFenced(store: Store, id: string, rpc: Rpc, root: string,
     try {
       const status = Status.parse(await rpc({ operation: 'activate', root, data: { id, digest } }));
       return recordRemoteStatus(store, id, status);
-    } catch (e) { store.update(id, { phase: 'unknown', ownership: 'fenced', execution: 'unknown', error: String(e) }); throw new CliError('AUTHORITY_UNCERTAIN', 'Source is fenced; activation acknowledgment was lost.', 'uncertain', 'Recover the existing ID; never recapture.', { transferId: id, digest }); }
+    } catch (e) { store.update(id, { phase: 'unknown', ownership: 'fenced', execution: 'unknown', error: String(e) }); throw withStreamCapability(e, new CliError('AUTHORITY_UNCERTAIN', 'Source is fenced; activation acknowledgment was lost.', 'uncertain', 'Recover the existing ID; never recapture.', { transferId: id, digest })); }
   });
 }
 export async function recoverOutbound(store: Store, id: string, rpc: Rpc, root: string, context: OperationContext = {}) {

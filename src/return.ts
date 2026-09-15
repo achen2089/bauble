@@ -1,6 +1,6 @@
 import { prepared } from './approval.js';
 import { action, type OperationContext, type Prepared } from './output.js';
-import { CliError } from './errors.js';
+import { CliError, withStreamCapability } from './errors.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -27,7 +27,7 @@ export async function resumeReturn(store: Store, initial: ReturnRoute, rpc: Rpc,
     const id = route.reverseId; const root = route.remoteRoot;
     const authority: Rpc = async request => {
       try { return await rpc(request); }
-      catch { throw new CliError('RETURN_UNCERTAIN', `Return ${request.operation} acknowledgment is unavailable; preserve the existing route.`, 'uncertain', 'Reconcile the exact reverse ID; never recapture or remove state.', { originalId: route.originalId, reverseId: id }, [action('Observe reverse route', 'read', 'status', id), action('Reconcile existing return when authorized', 'mutate', 'recover', id)]); }
+      catch (error) { throw withStreamCapability(error, new CliError('RETURN_UNCERTAIN', `Return ${request.operation} acknowledgment is unavailable; preserve the existing route.`, 'uncertain', 'Reconcile the exact reverse ID; never recapture or remove state.', { originalId: route.originalId, reverseId: id }, [action('Observe reverse route', 'read', 'status', id), action('Reconcile existing return when authorized', 'mutate', 'recover', id)])); }
     };
     if (options.approvalDigest && route.reverseDigest && options.approvalDigest !== route.reverseDigest) throw new CliError('APPROVAL_MISMATCH', 'Explicit approval differs from the existing reverse snapshot.', 'approval', 'Inspect the exact reverse ID.', { originalId: route.originalId, reverseId: id, digest: route.reverseDigest });
     if (options.prepare && existsSync(join(store.transfer(id), 'manifest.json'))) {

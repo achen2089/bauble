@@ -28,7 +28,7 @@ async function main() {
     if (command === '_helper') { const { Request, readMessage } = await import('./transport.js'); const { loadConfig } = await import('./config.js'); const { handleRequest } = await import('./helper.js'); const data = await handleRequest(Request.parse(await readMessage(process.stdin)), { config: loadConfig(), allowFixture: true }); process.stdout.write(JSON.stringify({ ok: true, data }) + '\n'); return; }
     if (command === '_runtime') { if (parsed.args.length !== 1 || typeof parsed.values.root !== 'string') throw new Error('Internal runtime requires ID and root'); const { resolve } = await import('node:path'); await (await import('./commands.js')).internalRuntime(parsed.args[0]!, resolve(parsed.values.root)); return; }
     if (parsed.args.length !== 1) throw new Error('Internal attachment requires one ticket');
-    const open = await import('./open.js'); await (command === '_open' ? open.terminalOpen(parsed.args[0]!) : open.remoteAttach(parsed.args[0]!)); return;
+    const open = await import('./open.js'); await (command === '_open' ? open.terminalOpen(parsed.args[0]!, controller.signal) : open.remoteAttach(parsed.args[0]!)); return;
   }
   if (parsed.help || command === 'help' || command === 'host') { printEnvelope(envelope('help', { help: helpText(parsed.help || command === 'host' ? command : parsed.args.join(' ') || undefined) }), asJson); return; }
   if (command === 'version') { printEnvelope(envelope(command, { version: VERSION, piVersion: PI_VERSION }), asJson); return; }

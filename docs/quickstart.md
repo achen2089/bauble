@@ -15,7 +15,7 @@ bauble host add worker --code-root /absolute/remote/code
 
 ## Start a fresh task
 
-Quiesce editors, builds, watchers and other writers before snapshotting. Review files/history for secrets: heuristic exclusions are not a security proof. A folder or Git workspace is captured immutably; plain folders are restored into a private synthetic repository. Context inputs are literal UTF-8 snapshots, not hooks. Repeating `run` creates a **new task**.
+Quiesce editors, builds, watchers and other writers before snapshotting. Review files/history for secrets: heuristic exclusions are not a security proof. A folder or Git workspace is captured immutably; plain folders are restored into a separate private non-Git workspace. Context inputs are literal UTF-8 snapshots, not hooks. Repeating `run` creates a **new task**.
 
 ```sh
 bauble run ./project --task TASK.md --context notes.txt --host worker --name audit --prepare

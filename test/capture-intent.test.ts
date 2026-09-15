@@ -11,7 +11,7 @@ import { createManaged } from '../src/pi/runtime.js';
 import { captureLive } from '../src/commands.js';
 import { captureObservation } from '../src/capture-intent.js';
 
-for (const mode of ['write-failure', 'missing', 'lost-ack']) test(`send capture intent: ${mode}, exact ID and JSON stderr redaction`, async () => {
+for (const mode of ['write-failure', 'connect-failure', 'rejected', 'missing', 'lost-ack']) test(`send capture intent: ${mode}, exact ID and JSON stderr redaction`, async () => {
   const root = fixtureRoot(); const repo = fixtureRepo(root); const profile = fixtureProfile(root); const native = fixtureSession(repo, root); const store = new Store(join(root, 'state'));
   const managed = await createManaged({ store, profilePath: profile.path, cwd: repo, manager: native.manager, allowTest: true });
   const config = join(root, 'config.json'); const destination = join(root, 'remote'); const instruction = join(root, 'instruction.txt'); const secret = 'literal sensitive instruction must not leak'; writeFileSync(instruction, secret);
@@ -20,6 +20,7 @@ for (const mode of ['write-failure', 'missing', 'lost-ack']) test(`send capture 
   const server = createServer(socket => { socket.on('error', () => {}); socket.once('data', async bytes => {
     calls++; const request = JSON.parse(bytes.toString()); admittedId = request.id;
     assert.ok(existsSync(join(store.root, 'capture-intents', admittedId + '.json')), 'intent is durable before admission');
+    if (mode === 'rejected') { socket.end(JSON.stringify({ ok: false, error: 'Rejected before capture: channel lost timeout' })); return; }
     if (capture) await captureLive(managed, store, { destination: request.destination, targetRoot: request.targetRoot, instruction: request.instruction, transferId: request.id });
     socket.destroy(); // Never send an ACK, including after successful durable capture.
   }); });
@@ -34,7 +35,15 @@ for (const mode of ['write-failure', 'missing', 'lost-ack']) test(`send capture 
       writeFileSync(join(store.root, 'capture-intents'), 'block directory creation');
       const failed = await send(); assert.equal(failed.code, 1); assert.equal(calls, 0); assert.equal(managed.guard.phase, 'open'); return;
     }
-    const lost = await send(); assert.equal(lost.code, 1); assert.equal(calls, 1); const id = admittedId;
+    if (mode === 'connect-failure') await new Promise<void>(ok => server.close(() => ok()));
+    if (mode === 'connect-failure' || mode === 'rejected') {
+      const failed = await send(); assert.equal(failed.code, 1); assert.equal(JSON.parse(failed.stdout).error.code, 'FAILED');
+      assert.equal(calls, mode === 'rejected' ? 1 : 0); assert.equal(managed.guard.phase, 'open'); return;
+    }
+    const lost = await send(); assert.equal(lost.code, 4); assert.equal(calls, 1); const id = admittedId;
+    const uncertainty = JSON.parse(lost.stdout); assert.equal(uncertainty.error.code, 'CAPTURE_UNCERTAIN');
+    assert.equal(uncertainty.data.transferId, id); assert.equal(uncertainty.data.checkpoint, store.transfer(id));
+    assert.deepEqual(uncertainty.nextActions, [{ description: 'Observe exact capture evidence', argv: ['bauble', 'status', id], effect: 'read' }]);
     assert.ok(lost.stderr.includes(id)); assert.ok(!lost.stderr.includes(secret)); assert.ok(!lost.stdout.includes(secret));
     if (mode === 'missing') {
       const observed = await invoke('status', id, '--json'); assert.equal(observed.code, 0); const data = JSON.parse(observed.stdout).data;

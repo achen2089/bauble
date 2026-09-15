@@ -45,10 +45,29 @@ export async function controlServer(path: string, handler: (data: unknown) => Pr
   });
   await new Promise<void>((ok, fail) => { server.once('error', fail); server.listen(path, ok); }); chmodSync(path, 0o600); return server;
 }
+export class ControlChannelError extends Error {
+  constructor(readonly admissionPossible: boolean) { super('Live control response unavailable; do not infer shutdown.'); }
+}
 export function control(path: string, data: unknown): Promise<unknown> {
-  return new Promise((ok, fail) => { const socket = createConnection(path); let result = Buffer.alloc(0); socket.setTimeout(120_000);
-    socket.on('connect', () => { const payload = JSON.stringify(data) + '\n'; if (Buffer.byteLength(payload) > MAX_MESSAGE) { socket.destroy(new Error('Control request exceeds 2 MiB limit')); return; } socket.write(payload); }); socket.on('data', chunk => { result = Buffer.concat([result, chunk]); if (result.length > MAX_MESSAGE) socket.destroy(new Error('Oversized control response')); });
-    socket.on('end', () => { try { const value = JSON.parse(result.toString()); invariant(value.ok, value.error); ok(value.data); } catch (e) { fail(e); } }); socket.on('error', fail); socket.on('timeout', () => socket.destroy(new Error('Live control timeout; do not infer shutdown')));
+  return new Promise((ok, fail) => {
+    const payload = JSON.stringify(data) + '\n'; invariant(Buffer.byteLength(payload) <= MAX_MESSAGE, 'Control request exceeds 2 MiB limit');
+    const socket = createConnection(path); let result = Buffer.alloc(0); let admissionPossible = false; let settled = false;
+    const lost = () => { if (!settled) { settled = true; fail(new ControlChannelError(admissionPossible)); } socket.destroy(); };
+    socket.setTimeout(120_000);
+    socket.on('connect', () => { admissionPossible = true; socket.write(payload); });
+    socket.on('data', chunk => { result = Buffer.concat([result, chunk]); if (result.length > MAX_MESSAGE) lost(); });
+    socket.on('end', () => {
+      if (settled) return;
+      let value: { ok: boolean; data?: unknown; error?: unknown };
+      try {
+        const raw = parseWireJson(result);
+        invariant(raw !== null && typeof raw === 'object' && 'ok' in raw && typeof raw.ok === 'boolean', 'Invalid control response');
+        value = raw as typeof value;
+      } catch { lost(); return; }
+      settled = true;
+      if (value.ok) ok(value.data); else fail(new Error(typeof value.error === 'string' ? value.error : 'Live control operation rejected'));
+    });
+    socket.on('error', lost); socket.on('timeout', lost); socket.on('close', lost);
   });
 }
 export const CHUNK = 384 * 1024;

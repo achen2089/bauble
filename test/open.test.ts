@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { Manifest, type Config, type Receipt, type Registration } from '../src/schema.js';
 import { fixtureProfile, fixtureRoot } from './fixtures.js';
 import { atomicWrite, json, run } from '../src/safe.js';
-import { attachmentBinding, AttachTicket, decodeTicket, verifyLocalAttachment, type AttachmentChecks } from '../src/attachment.js';
+import { attachmentBinding, AttachTicket, decodeTicket, encodeTicket, verifyLocalAttachment, type AttachmentChecks } from '../src/attachment.js';
 import { attachmentStore, attachResolved, openSession, resolveAttachment, terminalCommand, terminalScript } from '../src/open.js';
 import { handleRequest } from '../src/protocol.js';
 import { controlServer } from '../src/transport.js';
@@ -220,4 +220,45 @@ for (const mode of ['remote', 'local', 'signal']) test(`log follow: ${mode} reva
     assert.equal(code, mode === 'signal' ? 130 : 1, stderr); assert.equal(values.length, 2); assert.equal(values[0]!.data.text, 'first α\n'); assert.equal(values[1]!.ok, false); assert.equal(values[1]!.error!.code, mode === 'signal' ? 'INTERRUPTED' : 'FAILED');
     assert.equal(existsSync(count) ? readFileSync(count, 'utf8').trim().split('\n').length : 0, local ? 0 : 1);
   } finally { clearTimeout(timer); child.kill(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const mode of ['detach', 'failure', 'SIGINT', 'SIGTERM']) test(`_open: isolated persistent helper exits on ${mode}`, async () => {
+  const f = fixture(); const bin = join(f.root, 'bin'); mkdirSync(bin);
+  const config = join(f.root, 'config.json'); atomicWrite(config, json(f.config));
+  const pidFile = join(f.root, 'helper.pid'); const calls = join(f.root, 'calls');
+  const helper = join(f.root, 'helper.mjs'); const attached = join(f.root, 'attached.mjs'); const tty = join(f.root, 'tty.mjs');
+  writeFileSync(tty, 'Object.defineProperty(process.stdin, "isTTY", {value:true}); Object.defineProperty(process.stdout, "isTTY", {value:true});');
+  writeFileSync(helper, `import {writeFileSync, appendFileSync} from 'node:fs';
+    import {serveStream} from ${JSON.stringify(new URL('../src/stream.js', import.meta.url).href)};
+    writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+    await serveStream(process.stdin, process.stdout, async request => {
+      if (request.operation !== 'attach' || request.root !== ${JSON.stringify(f.store.root)}) throw Error('unexpected request');
+      appendFileSync(${JSON.stringify(calls)}, request.operation + '\\n'); return ${JSON.stringify(f.receipt)};
+    });`);
+  writeFileSync(attached, `import {readFileSync} from 'node:fs';
+    process.kill(Number(readFileSync(${JSON.stringify(pidFile)}, 'utf8')), 0);
+    console.log('ATTACHED'); ${mode === 'failure' ? 'process.exitCode = 1;' : mode === 'detach' ? '' : 'setTimeout(() => {}, 200);'}`);
+  writeFileSync(join(bin, 'ssh'), `#!/bin/sh\nif [ "$1" = "-t" ]; then exec '${process.execPath}' '${attached}'; fi\nexec '${process.execPath}' '${helper}'\n`, { mode: 0o700 });
+  const ticket = { ticket: { id: f.id, digest: f.receipt.digest, root: f.source.root, receipt: f.receipt }, alias: 'exact-host' };
+  const child = spawn(process.execPath, ['--import', tty, resolve('dist/src/cli.js'), '_open', encodeTicket(ticket)], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BAUBLE_CONFIG: config, BAUBLE_STATE: f.source.root }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = ''; let stderr = ''; let timedOut = false; let signalled = false;
+  child.stdout.on('data', bytes => { stdout += bytes; if (!signalled && stdout.includes('ATTACHED') && (mode === 'SIGINT' || mode === 'SIGTERM')) { signalled = true; child.kill(mode); } });
+  child.stderr.on('data', bytes => stderr += bytes);
+  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 8000);
+  try {
+    const code = await new Promise<number | null>((ok, fail) => { child.on('error', fail); child.on('close', ok); });
+    assert.equal(timedOut, false, 'Terminal subprocess must not retain a helper after attachment');
+    assert.equal(code, mode === 'detach' ? 0 : mode === 'failure' ? 1 : 130, stderr);
+    assert.match(stdout, /ATTACHED/); assert.equal(readFileSync(calls, 'utf8'), 'attach\n');
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { process.kill(pid, 0); } catch { return; }
+      await new Promise(ok => setTimeout(ok, 10));
+    }
+    assert.fail('Persistent helper survived Terminal completion');
+  } finally {
+    clearTimeout(timer); child.stdin.destroy(); child.kill();
+    if (existsSync(pidFile)) { try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch { /* Already closed. */ } }
+    rmSync(f.root, { recursive: true, force: true });
+  }
 });

@@ -20,6 +20,7 @@ if (mode === 'echo' || mode === 'lost-response') {
       if (mode === 'no-handshake') continue;
       await writeFrame(process.stdout, streamHello()); continue;
     }
+    if (mode === 'incompatible' && process.argv[3]) appendFileSync(process.argv[3], 'unexpected operation\n');
     if (mode === 'timeout') continue;
     if (mode === 'lost-ack') process.exit(0);
     if (mode === 'malformed') process.stdout.write('{not json}\n');
