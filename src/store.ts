@@ -1,24 +1,32 @@
+import { CliError } from './errors.js';
+import type { ZodType } from 'zod';
 import { existsSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Blobs } from './blobs.js';
 import { Manifest, Status, Owner, Registration, Id, Digest, type Receipt } from './schema.js';
 import { appendJournal, atomicWrite, hash, invariant, json, privateDir, readBytes, readJson, withLock } from './safe.js';
 import { stateRoot } from './config.js';
+function record<T>(path: string, schema: ZodType<T>): T { try { return readJson(path, schema); } catch { throw new CliError('CORRUPT_STATE', `State record is invalid or unavailable: ${path}`, 'target', 'Retain state; investigate the exact record rather than deleting it.'); } }
 export class Store {
   readonly blobs: Blobs;
-  constructor(readonly root = stateRoot()) { privateDir(root); this.blobs = new Blobs(join(root, 'blobs')); }
+  constructor(readonly root = stateRoot(), readonly readOnly = false) { if (!readOnly) privateDir(root); this.blobs = new Blobs(join(root, 'blobs'), readOnly); }
+  registrations() { const dir = join(this.root, 'sessions'); return existsSync(dir) ? readdirSync(dir).map(file => record(join(dir, file), Registration)) : []; }
   transfer(id: string) { return join(this.root, 'transfers', Id.parse(id)); }
   ownerPath(id: string) { return join(this.root, 'lineages', `${Id.parse(id)}.json`); }
-  owner(id: string) { return readJson(this.ownerPath(id), Owner); }
+  owner(id: string) { return record(this.ownerPath(id), Owner); }
   setOwner(owner: Owner) { atomicWrite(this.ownerPath(owner.lineageId), json(Owner.parse(owner))); }
   lock<T>(id: string, fn: () => T) { return withLock(join(this.root, 'locks', Id.parse(id)), fn); }
   registration(fileOrId: string): Registration {
-    const dir = join(this.root, 'sessions'); const matches = existsSync(dir) ? readdirSync(dir).map(file => readJson(join(dir, file), Registration)).filter(r => r.sessionId === fileOrId || resolve(r.sessionFile) === resolve(fileOrId)) : [];
+    const matches = this.registrations().filter(r => r.sessionId === fileOrId || resolve(r.sessionFile) === resolve(fileOrId));
     invariant(matches.length === 1, 'Select one registered session path/id. Bare files require explicit bauble pi --session <path> adoption; never selecting newest transcript.'); return matches[0]!;
   }
   register(reg: Registration) { atomicWrite(join(this.root, 'sessions', `${hash(reg.sessionFile)}.json`), json(Registration.parse(reg))); }
-  status(id: string) { return readJson(join(this.transfer(id), 'status.json'), Status); }
-  manifest(id: string) { const bytes = readBytes(join(this.transfer(id), 'manifest.json')); const manifest = Manifest.parse(JSON.parse(bytes.toString())); invariant(manifest.transferId === id, 'Transfer identity mismatch'); return { manifest, digest: hash(bytes), bytes }; }
+  status(id: string) { return record(join(this.transfer(id), 'status.json'), Status); }
+  manifest(id: string) {
+    const path = join(this.transfer(id), 'manifest.json');
+    try { const bytes = readBytes(path); const manifest = Manifest.parse(JSON.parse(bytes.toString())); invariant(manifest.transferId === id, 'Transfer identity mismatch'); return { manifest, digest: hash(bytes), bytes }; }
+    catch { throw new CliError('CORRUPT_STATE', `Immutable manifest is invalid or unavailable: ${path}`, 'target', 'Retain the exact checkpoint and investigate; never recapture to bypass corruption.'); }
+  }
   event(id: string, event: unknown) { appendJournal(join(this.transfer(id), 'journal.jsonl'), event); }
   update(id: string, patch: Partial<Status>) {
     const old = this.status(id); const next = Status.parse({ ...old, ...patch, updated: new Date().toISOString() });
@@ -77,5 +85,5 @@ export class Store {
       invariant(!status.receipt && !(owner?.transferId === id && owner.generation === manifest.generation && owner.state === 'owned') && !['launch_intent', 'active', 'unknown', 'returned'].includes(status.phase), 'Runtime activation may have happened; must pull or reconcile, never cancel'); this.update(id, { phase: 'cancelled', ownership: 'revoked' }); return { revoked: true, transferId: id, digest: status.digest }; });
   }
   receipt(id: string, receipt: Receipt) { const { manifest, digest } = this.manifest(id); invariant(receipt.transferId === id && receipt.lineageId === manifest.lineageId && receipt.generation === manifest.generation && receipt.digest === digest, 'Receipt binding mismatch'); this.update(id, { phase: 'active', ownership: 'destination', execution: 'idle', receipt }); }
-  list() { const dir = join(this.root, 'transfers'); return existsSync(dir) ? readdirSync(dir).filter(id => Id.safeParse(id).success).map(id => ({ ...this.status(id), manifest: this.manifest(id).manifest })) : []; }
+  list() { const dir = join(this.root, 'transfers'); return existsSync(dir) ? readdirSync(dir).map(id => { if (!Id.safeParse(id).success) throw new CliError('CORRUPT_STATE', `Invalid transfer record name: ${id}`, 'target'); const status = this.status(id); const { manifest, digest } = this.manifest(id); invariant(status.transferId === id && status.digest === digest, 'Status binding mismatch'); return { ...status, manifest }; }) : []; }
 }

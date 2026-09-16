@@ -1,0 +1,94 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { join, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { fixtureRoot, fixtureRepo, fixtureProfile, fixtureSession } from './fixtures.js';
+import { Store } from '../src/store.js';
+import { createManaged } from '../src/pi/runtime.js';
+import { internalRuntime } from '../src/commands.js';
+import { handleRequest } from '../src/helper.js';
+import { parseCommand } from '../src/registry.js';
+import { execute } from '../src/execute.js';
+import { snapshotProfile } from '../src/pi/profile.js';
+import { json, atomicWrite } from '../src/safe.js';
+import type { Config } from '../src/schema.js';
+import type { Rpc } from '../src/transport.js';
+import type { Prepared } from '../src/output.js';
+import { findReturn, resumeReturn } from '../src/return.js';
+
+for (const kind of ['run', 'send'] as const) test(`agent ${kind}: prepare → inspect → exact approval → recover → prepared return; no recapture/replay`, async t => {
+  const root = realpathSync(fixtureRoot()); const source = new Store(join(root, 'state')); const profile = fixtureProfile(root); const repo = fixtureRepo(root);
+  const configured = join(root, 'remote'); const remoteRoot = join(configured, 'fixtures', randomUUID());
+  const config: Config = { version: 1, hosts: { worker: { root: remoteRoot, profileDigest: snapshotProfile(profile.profile, root, source.blobs).digest } }, defaultHost: 'worker', profile: profile.path, localRoot: source.root, remoteRoot: configured };
+  const prior = { BAUBLE_CONFIG: process.env.BAUBLE_CONFIG, BAUBLE_STATE: process.env.BAUBLE_STATE, BAUBLE_TEST_MODE: process.env.BAUBLE_TEST_MODE };
+  process.env.BAUBLE_CONFIG = join(root, 'config.json'); process.env.BAUBLE_STATE = source.root; process.env.BAUBLE_TEST_MODE = '1'; atomicWrite(process.env.BAUBLE_CONFIG, json(config));
+  let remoteLive: Awaited<ReturnType<typeof internalRuntime>> | undefined; const operations: string[] = []; let launches = 0;
+  const rpc: Rpc = request => { operations.push(request.operation); return handleRequest(request, { config, allowFixture: true, launch: async (store, id) => { launches++; if (store.manifest(id).manifest.native.session !== null) (await import('../src/protocol.js')).prepareRestore(store, id); remoteLive = await internalRuntime(id, store.root, false); } }); };
+  const call = (args: string[]) => execute(parseCommand(args), { interactive: false, connect: () => rpc });
+  const bin = join(root, 'bin'); mkdirSync(bin); const incompatibleAdmission = join(root, 'incompatible-admission');
+  writeFileSync(join(bin, 'ssh'), `#!/bin/sh\nexec '${process.execPath}' '${resolve('dist/test/stream-process.js')}' incompatible '${incompatibleAdmission}'\n`, { mode: 0o700 });
+  const incompatible = (args: string[], code: string, exitCode: number) => {
+    const result = spawnSync(process.execPath, [resolve('dist/src/cli.js'), ...args, '--json'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', timeout: 8000 });
+    assert.equal(result.status, exitCode, result.stderr); const value = JSON.parse(result.stdout);
+    assert.equal(value.error.code, code); assert.match(value.error.hint, /Install Bauble 0\.2\.0 on both ends/);
+    assert.match(value.error.hint, /No downgrade or replay/); assert.ok(result.stderr.includes(args[1]!)); assert.equal(existsSync(incompatibleAdmission), false, 'Incompatible handshake must admit zero operations'); return value;
+  };
+  t.after(async () => { await remoteLive?.close(); for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } rmSync(root, { recursive: true, force: true }); });
+  let args: string[];
+  if (kind === 'send') { const session = fixtureSession(repo, root); const managed = await createManaged({ store: source, profilePath: profile.path, cwd: repo, manager: session.manager, allowTest: true }); await managed.close(); const reg = source.registration(session.manager.getSessionId()); source.register({ ...reg, pid: 2147483647, start: 'exited fixture' }); args = ['send', '--session', reg.sessionId, '--prepare']; }
+  else args = ['run', repo, '--prompt', 'literal sensitive instruction', '--name', 'agent-job', '--prepare'];
+  const cancelled = (await call(args)).data as Prepared; await call(['recover', cancelled.transferId, '--cancel']); assert.equal(source.status(cancelled.transferId).phase, 'cancelled'); await assert.rejects(call(['approve', cancelled.transferId, '--approval-digest', cancelled.digest]), /terminal/); assert.deepEqual(operations, []);
+  if (kind === 'send') assert.equal(source.owner(source.manifest(cancelled.transferId).manifest.lineageId).state, 'owned');
+  const result = await call(args); const prepared = result.data as Prepared; assert.notEqual(prepared.transferId, cancelled.transferId); assert.equal(prepared.prepared, true); assert.deepEqual(operations, []); assert.equal(prepared.sourceFrozen, kind === 'send');
+  assert.equal(existsSync(join(source.transfer(prepared.transferId), 'approval.json')), false);
+  if (kind === 'send') assert.equal(source.owner(source.manifest(prepared.transferId).manifest.lineageId).state, 'frozen');
+  if (kind === 'run') await assert.rejects(call(['status', 'agent-job']), (error: unknown) => { const e = error as { code: string; data: { candidates: string[] } }; assert.equal(e.code, 'AMBIGUOUS_TARGET'); assert.deepEqual(new Set(e.data.candidates), new Set([cancelled.transferId, prepared.transferId])); return true; });
+  const inspected = await call(['inspect', prepared.transferId]); assert.equal((inspected.data as { digest: string }).digest, prepared.digest);
+  const before = readFileSync(join(source.transfer(prepared.transferId), 'status.json'));
+  await call(['status', prepared.transferId]); await call(['sessions']); await call(['ls']); assert.deepEqual(readFileSync(join(source.transfer(prepared.transferId), 'status.json')), before);
+  await assert.rejects(call(['approve', prepared.transferId, '--approval-digest', '0'.repeat(64)]), { code: 'APPROVAL_MISMATCH' });
+  await call(['approve', prepared.transferId, '--approval-digest', prepared.digest]); assert.deepEqual(operations, []); assert.equal(launches, 0);
+  if (kind === 'send') assert.equal(source.owner(source.manifest(prepared.transferId).manifest.lineageId).state, 'frozen');
+  const beforeIncompatible = readFileSync(join(source.transfer(prepared.transferId), 'status.json'));
+  const rejectedBuild = incompatible(['recover', prepared.transferId], 'STREAM_CAPABILITY', 1); assert.equal(rejectedBuild.data.transferId, prepared.transferId);
+  assert.deepEqual(readFileSync(join(source.transfer(prepared.transferId), 'status.json')), beforeIncompatible); assert.equal(existsSync(join(source.transfer(prepared.transferId), 'dispatch.json')), false);
+  await call(['recover', prepared.transferId]); assert.equal(launches, 1);
+  const uncertainBuild = incompatible(['recover', prepared.transferId], 'AUTHORITY_UNCERTAIN', 4);
+  assert.equal(uncertainBuild.data.transferId, prepared.transferId); assert.equal(uncertainBuild.data.digest, prepared.digest); assert.equal(uncertainBuild.data.cause.code, 'STREAM_CAPABILITY'); assert.equal(launches, 1);
+  const statusBefore = readFileSync(join(source.transfer(prepared.transferId), 'status.json')); const observed = await call(['status', prepared.transferId, '--refresh']); assert.equal((observed.data as { observation: string }).observation, 'remote-durable'); assert.deepEqual(readFileSync(join(source.transfer(prepared.transferId), 'status.json')), statusBefore);
+  await call(['recover', prepared.transferId]); assert.equal(launches, 1);
+  await remoteLive!.runtime.session.prompt('fixture:write {"path":"result.txt","content":"return result"}', { expandPromptTemplates: false }); await remoteLive!.close();
+  const remote = new Store(remoteRoot); const remoteReg = remote.registration(remote.status(prepared.transferId).receipt!.sessionId); remote.register({ ...remoteReg, pid: 2147483647, start: 'exited fixture' });
+  const incompatiblePull = incompatible(['pull', prepared.transferId, '--prepare'], 'RETURN_UNCERTAIN', 4);
+  assert.equal(incompatiblePull.data.originalId, prepared.transferId); const routeId = incompatiblePull.data.reverseId;
+  assert.equal(incompatiblePull.data.cause.code, 'STREAM_CAPABILITY'); assert.ok(routeId); assert.equal(existsSync(join(source.transfer(routeId), 'manifest.json')), false);
+  const incompatibleReturn = incompatible(['recover', routeId], 'RETURN_UNCERTAIN', 4); assert.equal(incompatibleReturn.data.reverseId, routeId);
+  assert.equal(remote.owner(remoteReg.lineageId).state, 'owned'); assert.equal(operations.filter(op => op === 'capture').length, 0);
+  const returned = (await call(['pull', prepared.transferId, '--prepare'])).data as Prepared; assert.equal(returned.reverseId, routeId); assert.equal(returned.originalId, prepared.transferId); assert.equal(returned.reverseId, returned.transferId); assert.equal(returned.remoteFrozen, true);
+  assert.equal(remote.owner(remoteReg.lineageId).state, 'frozen'); assert.equal(existsSync(join(source.root, 'runs', returned.transferId)), false); assert.equal(existsSync(join(remote.transfer(returned.transferId), 'approval.json')), false);
+  const reverseStatusBefore = readFileSync(join(source.transfer(returned.transferId), 'status.json')); const reverseObserved = await call(['status', returned.transferId, '--refresh']); assert.equal((reverseObserved.data as { observation: string }).observation, 'remote-durable'); assert.deepEqual(readFileSync(join(source.transfer(returned.transferId), 'status.json')), reverseStatusBefore);
+  const captures = operations.filter(op => op === 'capture').length; const reverseManifest = readFileSync(join(source.transfer(returned.transferId), 'manifest.json'));
+  const rejectsReturnBuild = () => {
+    const beforeRoute = findReturn(source, returned.transferId); const beforeOwner = remote.owner(remoteReg.lineageId); const beforeStatus = readFileSync(join(source.transfer(returned.transferId), 'status.json'));
+    const value = incompatible(['recover', returned.transferId], 'RETURN_UNCERTAIN', 4);
+    assert.equal(value.data.originalId, prepared.transferId); assert.equal(value.data.reverseId, returned.transferId); assert.equal(value.data.cause.code, 'STREAM_CAPABILITY');
+    assert.deepEqual(findReturn(source, returned.transferId), beforeRoute); assert.deepEqual(remote.owner(remoteReg.lineageId), beforeOwner); assert.deepEqual(readFileSync(join(source.transfer(returned.transferId), 'status.json')), beforeStatus);
+    assert.deepEqual(readFileSync(join(source.transfer(returned.transferId), 'manifest.json')), reverseManifest); assert.equal(operations.filter(op => op === 'capture').length, captures);
+  };
+  rejectsReturnBuild(); // Prepared route: first remote request is the read-only status query.
+  const repeated = (await call(['pull', prepared.transferId, '--prepare'])).data as Prepared; assert.equal(repeated.reverseId, returned.reverseId); assert.equal(operations.filter(op => op === 'capture').length, captures);
+  await call(['inspect', returned.transferId]); await call(['approve', returned.transferId, '--approval-digest', returned.digest]);
+  rejectsReturnBuild(); // Approved route: first remote request records the exact remote approval.
+  const rejectsPreparation = async () => { const before = operations.length; await assert.rejects(call(['pull', prepared.transferId, '--prepare']), (error: unknown) => { const e = error as { code: string; data: Record<string, unknown> }; assert.equal(e.code, 'PHASE_CONFLICT'); assert.equal(e.data.reverseId, returned.transferId); assert.equal(e.data.originalId, prepared.transferId); assert.equal('remoteFrozen' in e.data, false); return true; }); assert.equal(operations.length, before); };
+  await rejectsPreparation();
+  if (kind === 'send') { await assert.rejects(resumeReturn(source, findReturn(source, returned.transferId)!, rpc, async () => { assert.fail('Already approved'); }, point => { if (point === 'restoration') throw new Error('stop after restoration'); }), /stop after restoration/); assert.equal(source.status(returned.transferId).phase, 'ready'); await rejectsPreparation(); }
+  const restored = (await call(['recover', returned.transferId])).data as { cwd: string; returned: boolean }; assert.equal(restored.returned, true); assert.equal(readFileSync(join(restored.cwd, 'result.txt'), 'utf8'), 'return result'); assert.equal(existsSync(join(repo, 'result.txt')), false);
+  assert.equal(operations.filter(op => op === 'capture').length, captures); assert.deepEqual(readFileSync(join(source.transfer(returned.transferId), 'manifest.json')), reverseManifest); assert.equal(launches, 1);
+  // Model a completed local claim whose remote finish acknowledgment was not retained.
+  rmSync(join(source.transfer(returned.transferId), 'return-finished.json'));
+  const finishBuild = incompatible(['recover', returned.transferId], 'RETURN_UNCERTAIN', 4);
+  assert.equal(finishBuild.data.originalId, prepared.transferId); assert.equal(finishBuild.data.reverseId, returned.transferId); assert.equal(finishBuild.data.cause.code, 'STREAM_CAPABILITY');
+  await call(['recover', returned.transferId]); assert.equal(launches, 1); await rejectsPreparation();
+});

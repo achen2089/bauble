@@ -1,3 +1,4 @@
+import { CliError } from './errors.js';
 import { targetRepository } from './targets.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -9,7 +10,8 @@ import { atomicWrite, hash, invariant, json, privateDir, readJson, syncDir, with
 import { attachmentBinding, registrationMatches, sameReceipt } from './attachment.js';
 import { loadConfig } from './config.js';
 import { control, ssh, type Rpc } from './transport.js';
-import { processMatches, type Managed } from './pi/runtime.js';
+import type { Managed } from './pi/runtime.js';
+import { processMatches } from './process.js';
 
 export const MESSAGE_CAPABILITY = 'message-v1';
 export const messageCapabilityError = 'Existing helper/runtime lacks message-v1 capability or cannot verify it. Install a compatible Bauble build on both ends for future launches; an already-running older Pi cannot be upgraded in place. No automatic restart or delivery.';
@@ -62,9 +64,9 @@ export function messageRuntimeBinding(store: Store, receipt: Receipt) {
 export async function checkMessageRuntime(store: Store, receipt: Receipt) {
   const reg = messageRuntimeBinding(store, receipt);
   let raw: unknown;
-  try { raw = await control(reg.socket, { operation: 'observe' }); } catch { throw new Error(messageCapabilityError); }
+  try { raw = await control(reg.socket, { operation: 'observe' }); } catch { throw new CliError('CAPABILITY', messageCapabilityError, 'capability'); }
   const observation = z.object({ registration: Registration, frozen: z.string(), capabilities: z.array(z.string()).optional() }).passthrough().parse(raw);
-  invariant(observation.capabilities?.includes(MESSAGE_CAPABILITY), messageCapabilityError);
+  if (!observation.capabilities?.includes(MESSAGE_CAPABILITY)) throw new CliError('CAPABILITY', messageCapabilityError, 'capability');
   invariant(observation.frozen === 'open', 'Message runtime is frozen or fenced');
   registrationMatches(observation.registration, receipt);
   messageRuntimeBinding(store, receipt);
@@ -178,7 +180,7 @@ export async function messageSession(id: string, text: string, requestId: string
   const dispatch = Dispatch.parse({ requestId, textDigest, ...route }); const rpc = rpcFor(dispatch, options, store);
   let ready: unknown;
   try { ready = await rpc({ operation: 'message-check', root: dispatch.root, data: { receipt: dispatch.receipt } }); }
-  catch (error) { throw new Error(`${messageCapabilityError} ${error instanceof Error ? error.message : 'Verification failed'}`); }
+  catch (error) { if (error instanceof CliError) throw error; throw new CliError('CAPABILITY', messageCapabilityError, 'capability'); }
   const capability = z.object({ capability: z.literal(MESSAGE_CAPABILITY), receipt: Receipt }).strict().parse(ready); sameReceipt(capability.receipt, dispatch.receipt);
   invariant(json(routeMessage(store, id, config)) === json(route), 'Message route/owner changed before intent');
   const created = withLock(join(store.root, 'message-locks', requestId), () => {

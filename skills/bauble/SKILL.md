@@ -5,6 +5,12 @@ description: Launch fresh remote Pi tasks or hand off native sessions with Baubl
 
 # Bauble
 
+Discover the current interface with `bauble help <command>` and `bauble docs --list`. Read `bauble docs quickstart`, `automation`, `configuration`, or `recovery` for the complete manual. JSON in 0.2.0 uses schemaVersion 1 envelopes with named arrays under `data`; accepted/idle/windowRequested never means task done.
+
+Retain stderr as well as stdout: durable IDs are emitted before possible channel loss even with `--json --quiet`. A missing capture manifest is uncertain, not permission to recapture; observe the exact intent/return ID using `status` and read `bauble docs recovery`. Incompatible remote builds require explicit upgrade, never automatic downgrade, replay, or restart.
+
+For explicit agent approval use `run ... --prepare`, `send --session ... --prepare`, or `pull ORIGINAL-ID --prepare` → `inspect EXACT-ID` → user-authorized `approve EXACT-ID --approval-digest SHA256` → `recover EXACT-ID` (REVERSE-ID for returns). Preparation preserves freezes. Never repeat capture to resume, or approve merely to bypass review. `sessions --json` lists only registered local sessions; `status` is cached unless explicitly refreshed.
+
 ## Establish the target
 
 1. Inspect `bauble --help`, `bauble ls --json`, and the effective configuration (`BAUBLE_CONFIG` or `~/.config/bauble/config.json`). Preserve any explicit `BAUBLE_STATE` override. For missing configuration, follow the host-setup branch below; report a missing CLI instead of installing without authorization.
@@ -13,7 +19,7 @@ description: Launch fresh remote Pi tasks or hand off native sessions with Baubl
 
 ## Configure a host or launch a fresh task
 
-1. For first setup, use `bauble host add <ssh-alias> --default --profile /absolute/path/profile.json`. Existing configs remain in place; `bauble host list` and `bauble host default <alias>` inspect/select destinations. Without an explicit first profile, only ordinary Pi's saved provider/model/thinking may seed a minimal builtins-only profile. Inspect the printed effective choices and exclusions before proceeding. Missing selections or mismatched profiles require configuration, not invented defaults.
+1. For first setup, use `bauble host add <ssh-alias> --default --profile /absolute/path/profile.json`. Existing configs remain in place; `bauble host list` and `bauble host default <alias>` inspect/select destinations. Without an explicit first profile, only ordinary Pi's saved provider/model/thinking may seed a minimal builtins-only profile. Inspect the selected controlled profile file and `bauble docs configuration` before proceeding. Missing selections or mismatched profiles require configuration, not invented defaults.
 2. The remote must already have compatible Bauble, tmux and an independently configured profile/credentials. With explicit user authorization, `bauble setup <alias> --code-root /absolute/remote/code` updates only that remote config field with a backup. The folder must already exist and be private/canonical; state remains separate. Ordinary host setup never provisions software or replaces remote profiles.
 3. Confirm the literal task, context and quiescent workspace, then choose one command:
 
@@ -23,7 +29,7 @@ description: Launch fresh remote Pi tasks or hand off native sessions with Baubl
    ```
 
    The workspace defaults to current cwd; `--cwd /path/to/folder` is an alternative to the positional folder. Task/context paths resolve from the invoking directory. Repeat `--context` for additional text files/directories. Plain folders stay non-Git; Git captures the repository root/history plus exact dirty index/worktree and shows nested-cwd mapping. For exclusions, path limits or profile selection, consult [Fresh remote tasks](../../README.md#fresh-remote-tasks).
-4. Default approval is interactive and refuses non-TTY dispatch. Use `--auto-approve` **only when the user explicitly authorized this unattended task**: it prints and durably approves this immutable inventory/digest/target/literal instruction, not unrelated commands. It leaves secret/path/ownership checks and OS permissions intact; native tools are not sandboxed. This opt-in belongs to `run` and explicit result `pull`, not older `send`.
+4. Default approval is interactive and refuses non-TTY dispatch. Use `--auto-approve` **only when the user explicitly authorized this unattended task**: it durably approves this immutable inventory/digest/target/literal instruction and reports identifiers, not unrelated commands or the full inventory. Use `--prepare` followed by `inspect` when review is needed before dispatch. It leaves secret/path/ownership checks and OS permissions intact; native tools are not sandboxed. This opt-in belongs to `run` and explicit result `pull`, not older `send`.
 5. Retain the printed UUID before observing work. The destination creates a genuinely fresh native Pi session; no local seed or transcript is needed. Readiness/idle is not acceptance or task success. Repeating `run` creates another task. After dispatch uncertainty, use `recover <uuid>` for read-only reconciliation, never rerun the task to retry.
 
 Task/context Markdown is literal input, including frontmatter and slash/shell-looking text. Bauble executes no document hooks. Native lifecycle events are retained in the transfer's `journal.jsonl`; use terminal/log/transcript evidence to assess the task. This workflow supports Pi only.
@@ -47,7 +53,7 @@ bauble open <transfer-id>
 bauble open <transfer-id> --here
 ```
 
-Use `open` for a new macOS Terminal window; use `--here` or `bauble attach <transfer-id>` from an interactive terminal elsewhere. These attach to an existing verified Pi process. A window request is not proof of attachment. Missing or uncertain readiness calls for recovery, not a new runtime. `ls` shows name/UUID/host/cwd/execution/socket/target. Each job has a separate tmux server: use the printed destination `tmux -L <socket> attach-session -t <target>`, not ordinary `tmux ls`, or prefer verified `open`.
+Use `open` for a new macOS Terminal window; use `--here` or `bauble attach <transfer-id>` from an interactive terminal elsewhere. These attach to an existing verified Pi process. A window request is not proof of attachment. Missing or uncertain readiness calls for recovery, not a new runtime. `ls` shows name/UUID/host, source/target paths, execution and readiness metadata. Each job has a separate tmux server; prefer verified `open` or `attach` over searching ordinary `tmux ls`.
 
 ## Message an existing runtime
 

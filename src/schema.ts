@@ -1,6 +1,7 @@
 import { z } from 'zod';
 export const PROTOCOL = 1;
-export const PI_VERSION = '0.85.1';
+import { PI_VERSION } from './metadata.js';
+export { PI_VERSION } from './metadata.js';
 export const Id = z.uuid();
 export const Digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const Alias = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/);

@@ -1,13 +1,14 @@
+import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { Store } from '../src/store.js';
 import { Manifest, type Config, type Receipt, type Registration } from '../src/schema.js';
 import { fixtureProfile, fixtureRoot } from './fixtures.js';
 import { atomicWrite, json, run } from '../src/safe.js';
-import { attachmentBinding, AttachTicket, decodeTicket, verifyLocalAttachment, type AttachmentChecks } from '../src/attachment.js';
+import { attachmentBinding, AttachTicket, decodeTicket, encodeTicket, verifyLocalAttachment, type AttachmentChecks } from '../src/attachment.js';
 import { attachmentStore, attachResolved, openSession, resolveAttachment, terminalCommand, terminalScript } from '../src/open.js';
 import { handleRequest } from '../src/protocol.js';
 import { controlServer } from '../src/transport.js';
@@ -146,8 +147,8 @@ test('open: actionable headless/TTY/window errors, and CLI usage', async () => {
     await assert.rejects(openSession(f.id, false, f.store, { ...options, platform: 'linux' }), /Linux\/headless.*--here/);
     await assert.rejects(openSession(f.id, true, f.store, { ...options, interactive: false }), /interactive terminal.*ssh -t/);
     await assert.rejects(openSession(f.id, false, f.store, { ...options, platform: 'darwin' }), /Could not open Terminal.app.*--here/);
-    assert.match(run(process.execPath, ['dist/src/cli.js', '--help']).toString(), /open <id> \[--here\]/);
-    assert.throws(() => run(process.execPath, ['dist/src/cli.js', 'attach', f.id, '--here']), /supported only by open/);
+    assert.match(run(process.execPath, ['dist/src/cli.js', 'open', '--help']).toString(), /--here/);
+    assert.throws(() => run(process.execPath, ['dist/src/cli.js', 'attach', f.id, '--here']), /USAGE/);
     await assert.rejects(openSession('not-an-id', true, f.store, { ...options, interactive: true }));
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -171,6 +172,93 @@ test('open: actual isolated tmux pane PID plus control receipt verifies; replace
     await assert.rejects(verifyLocalAttachment(f.store, f.id), /process identity|pane\/process identity/);
   } finally {
     server?.close(); try { run('tmux', ['-L', f.receipt.socket, 'kill-server']); } catch { /* Only this test's isolated tmux server. */ }
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('log CLI: finite JSON and ordered follow NDJSON, then terminal interruption without state changes', async () => {
+  const f = fixture(); const path = join(f.store.transfer(f.id), 'run.log'); writeFileSync(path, 'first α\n');
+  const configPath = join(f.root, 'log-config.json'); atomicWrite(configPath, json(f.config));
+  const env = { ...process.env, BAUBLE_STATE: f.store.root, BAUBLE_CONFIG: configPath };
+  try {
+    const before = readFileSync(join(f.store.transfer(f.id), 'status.json'));
+    const finite = spawnSync(process.execPath, ['dist/src/cli.js', 'log', f.id, '--json'], { env, encoding: 'utf8' }); assert.equal(finite.status, 0, finite.stderr); assert.equal(JSON.parse(finite.stdout).data.text, 'first α\n');
+    const child = spawn(process.execPath, ['dist/src/cli.js', 'log', f.id, '--follow', '--json'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const values: Array<{ ok: boolean; data: { sequence?: number; text?: string }; error: { code: string } | null }> = []; let pending = ''; let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const timer = setTimeout(() => child.kill('SIGKILL'), 8000);
+    child.stdout.on('data', bytes => { pending += bytes.toString(); const lines = pending.split('\n'); pending = lines.pop()!; for (const line of lines) { const value = JSON.parse(line); values.push(value); if (value.ok && value.data.sequence === 0) appendFileSync(path, 'second 🙂\n'); if (value.ok && value.data.text === 'second 🙂\n') child.kill('SIGINT'); } });
+    const code = await new Promise<number | null>((ok, fail) => { child.on('error', fail); child.on('exit', ok); }); clearTimeout(timer);
+    assert.equal(code, 130, stderr); assert.equal(values[0]!.data.text, 'first α\n'); assert.equal(values[1]!.data.text, 'second 🙂\n'); assert.equal(values[1]!.data.sequence, 1); assert.equal(values.at(-1)!.error!.code, 'INTERRUPTED'); assert.deepEqual(readFileSync(join(f.store.transfer(f.id), 'status.json')), before);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+
+for (const mode of ['remote', 'local', 'signal']) test(`log follow: ${mode} revalidation/cleanup and terminal errors stay NDJSON`, async () => {
+  const local = mode === 'local';
+  const f = fixture(); const path = join(f.store.transfer(f.id), 'run.log'); writeFileSync(path, 'first α\n');
+  const configPath = join(f.root, 'log-config.json'); atomicWrite(configPath, json(f.config));
+  const bin = join(f.root, 'bin'); mkdirSync(bin); const count = join(f.root, 'helper-count');
+  const cli = resolve('dist/src/cli.js');
+  writeFileSync(join(bin, 'ssh'), `#!/bin/sh\necho helper >> '${count}'\nexec '${process.execPath}' '${cli}' _helper-stream\n`, { mode: 0o700 });
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, BAUBLE_STATE: local ? f.store.root : f.source.root, BAUBLE_CONFIG: configPath };
+  const child = spawn(process.execPath, [cli, 'log', f.id, '--follow', '--json'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const values: Array<{ ok: boolean; data: { text?: string; sequence?: number }; error: { code: string } | null }> = []; let pending = ''; let stderr = '';
+  child.stderr.on('data', bytes => stderr += bytes); const timer = setTimeout(() => child.kill('SIGKILL'), 8000);
+  child.stdout.on('data', bytes => { pending += bytes.toString(); const lines = pending.split('\n'); pending = lines.pop()!;
+    for (const line of lines) { const value = JSON.parse(line); values.push(value);
+      if (value.ok && value.data.sequence === 0) {
+        if (mode === 'signal') { child.kill('SIGTERM'); continue; }
+        appendFileSync(path, 'not authorized after change\n');
+        if (local) f.store.setOwner({ ...f.store.owner(f.manifest.lineageId), state: 'fenced' });
+        else atomicWrite(configPath, json({ ...f.config, hosts: { 'exact-host': { ...f.config.hosts['exact-host'], root: join(f.root, 'changed') } } }));
+      }
+    }
+  });
+  try {
+    const code = await new Promise<number | null>((ok, fail) => { child.on('error', fail); child.on('close', ok); });
+    assert.equal(code, mode === 'signal' ? 130 : 1, stderr); assert.equal(values.length, 2); assert.equal(values[0]!.data.text, 'first α\n'); assert.equal(values[1]!.ok, false); assert.equal(values[1]!.error!.code, mode === 'signal' ? 'INTERRUPTED' : 'FAILED');
+    assert.equal(existsSync(count) ? readFileSync(count, 'utf8').trim().split('\n').length : 0, local ? 0 : 1);
+  } finally { clearTimeout(timer); child.kill(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
+for (const mode of ['detach', 'failure', 'SIGINT', 'SIGTERM']) test(`_open: isolated persistent helper exits on ${mode}`, async () => {
+  const f = fixture(); const bin = join(f.root, 'bin'); mkdirSync(bin);
+  const config = join(f.root, 'config.json'); atomicWrite(config, json(f.config));
+  const pidFile = join(f.root, 'helper.pid'); const calls = join(f.root, 'calls');
+  const helper = join(f.root, 'helper.mjs'); const attached = join(f.root, 'attached.mjs'); const tty = join(f.root, 'tty.mjs');
+  writeFileSync(tty, 'Object.defineProperty(process.stdin, "isTTY", {value:true}); Object.defineProperty(process.stdout, "isTTY", {value:true});');
+  writeFileSync(helper, `import {writeFileSync, appendFileSync} from 'node:fs';
+    import {serveStream} from ${JSON.stringify(new URL('../src/stream.js', import.meta.url).href)};
+    writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+    await serveStream(process.stdin, process.stdout, async request => {
+      if (request.operation !== 'attach' || request.root !== ${JSON.stringify(f.store.root)}) throw Error('unexpected request');
+      appendFileSync(${JSON.stringify(calls)}, request.operation + '\\n'); return ${JSON.stringify(f.receipt)};
+    });`);
+  writeFileSync(attached, `import {readFileSync} from 'node:fs';
+    process.kill(Number(readFileSync(${JSON.stringify(pidFile)}, 'utf8')), 0);
+    console.log('ATTACHED'); ${mode === 'failure' ? 'process.exitCode = 1;' : mode === 'detach' ? '' : 'setTimeout(() => {}, 200);'}`);
+  writeFileSync(join(bin, 'ssh'), `#!/bin/sh\nif [ "$1" = "-t" ]; then exec '${process.execPath}' '${attached}'; fi\nexec '${process.execPath}' '${helper}'\n`, { mode: 0o700 });
+  const ticket = { ticket: { id: f.id, digest: f.receipt.digest, root: f.source.root, receipt: f.receipt }, alias: 'exact-host' };
+  const child = spawn(process.execPath, ['--import', tty, resolve('dist/src/cli.js'), '_open', encodeTicket(ticket)], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, BAUBLE_CONFIG: config, BAUBLE_STATE: f.source.root }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = ''; let stderr = ''; let timedOut = false; let signalled = false;
+  child.stdout.on('data', bytes => { stdout += bytes; if (!signalled && stdout.includes('ATTACHED') && (mode === 'SIGINT' || mode === 'SIGTERM')) { signalled = true; child.kill(mode); } });
+  child.stderr.on('data', bytes => stderr += bytes);
+  const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 8000);
+  try {
+    const code = await new Promise<number | null>((ok, fail) => { child.on('error', fail); child.on('close', ok); });
+    assert.equal(timedOut, false, 'Terminal subprocess must not retain a helper after attachment');
+    assert.equal(code, mode === 'detach' ? 0 : mode === 'failure' ? 1 : 130, stderr);
+    assert.match(stdout, /ATTACHED/); assert.equal(readFileSync(calls, 'utf8'), 'attach\n');
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { process.kill(pid, 0); } catch { return; }
+      await new Promise(ok => setTimeout(ok, 10));
+    }
+    assert.fail('Persistent helper survived Terminal completion');
+  } finally {
+    clearTimeout(timer); child.stdin.destroy(); child.kill();
+    if (existsSync(pidFile)) { try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch { /* Already closed. */ } }
     rmSync(f.root, { recursive: true, force: true });
   }
 });

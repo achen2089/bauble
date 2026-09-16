@@ -1,7 +1,10 @@
+import { execute } from '../src/execute.js';
+import { parseCommand } from '../src/registry.js';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { fixtureRoot, fixtureRepo, fixtureProfile, fixtureSession } from './fixtures.js';
 import { Store } from '../src/store.js';
@@ -13,6 +16,7 @@ import { beginReturn, findReturn, resumeReturn, type ReturnBoundary } from '../s
 import { type Config } from '../src/schema.js';
 import { type Rpc } from '../src/transport.js';
 import { atomicWrite } from '../src/safe.js';
+import { CliError } from '../src/errors.js';
 
 async function sourceFixture() {
   const root = fixtureRoot(); const repo = fixtureRepo(root); const profile = fixtureProfile(root); const session = fixtureSession(repo, root); const store = new Store(join(root, 'state'));
@@ -88,7 +92,7 @@ test('premature pull leaves outbound recovery available after activation dispatc
       if (request.operation === 'activate' && failActivation) throw new Error('activation not dispatched');
       return handleRequest(request, { config: f.config, allowFixture: true, launch: async () => { launches++; } });
     };
-    await assert.rejects(sendCheckpoint(f.store, id, rpc, f.destination), /activation not dispatched/);
+    await assert.rejects(sendCheckpoint(f.store, id, rpc, f.destination), { code: 'AUTHORITY_UNCERTAIN' });
     assert.equal(new Store(f.destination).status(id).phase, 'ready');
     assert.throws(() => beginReturn(f.store, id, f.alias, f.destination), /recover the outbound transfer/);
     assert.equal(findReturn(f.store, id), undefined);
@@ -137,10 +141,43 @@ for (const lost of ['capture', 'fence'] as const) test(`return recovery: lost ${
   try {
     const route = beginReturn(f.store, f.captured.manifest.transferId, f.alias, f.destination); let once = true;
     const losing: Rpc = async request => { const result = await f.rpc(request); if (request.operation === lost && once) { once = false; throw new Error(`lost ${lost} acknowledgment`); } return result; };
-    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), /lost .* acknowledgment/);
+    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), { code: 'RETURN_UNCERTAIN' });
     assert.equal(f.store.owner(f.captured.manifest.lineageId).state, 'fenced');
     assert.equal(f.remote.owner(f.captured.manifest.lineageId).transferId, route.reverseId);
-    const reg = await recover(route.reverseId, false, new Store(f.store.root), { config: f.config, connect: () => f.rpc, approvalDigest: f.remote.manifest(route.reverseId).digest });
+    const configPath = join(f.root, 'config.json'); writeFileSync(configPath, JSON.stringify(f.config));
+    const previousState = process.env.BAUBLE_STATE; const previousConfig = process.env.BAUBLE_CONFIG;
+    let reg: { sessionFile: string; cwd: string };
+    try {
+      process.env.BAUBLE_STATE = f.store.root; process.env.BAUBLE_CONFIG = configPath;
+      if (lost === 'capture') {
+        assert.equal(existsSync(join(f.store.transfer(route.reverseId), 'manifest.json')), false);
+        const observed = spawnSync(process.execPath, [resolve('dist/src/cli.js'), 'status', route.reverseId, '--json'], { env: process.env, encoding: 'utf8' });
+        assert.equal(observed.status, 0, observed.stderr); const data = JSON.parse(observed.stdout).data;
+        assert.equal(data.observation, 'return-route'); assert.equal(data.reverseId, route.reverseId); assert.equal(data.phase, 'unknown');
+        assert.equal(findReturn(f.store, route.reverseId)!.reverseDigest, null);
+      }
+      {
+        // Even after a lost fence ACK, the cached checkpoint cannot clear route uncertainty.
+        const beforeRoute = findReturn(f.store, route.reverseId); const beforeOwner = f.remote.owner(f.captured.manifest.lineageId);
+        const bin = join(f.root, 'bin'); mkdirSync(bin); const admission = join(f.root, 'incompatible-admission');
+        writeFileSync(join(bin, 'ssh'), `#!/bin/sh\nexec '${process.execPath}' '${resolve('dist/test/stream-process.js')}' incompatible '${admission}'\n`, { mode: 0o700 });
+        const rejected = spawnSync(process.execPath, [resolve('dist/src/cli.js'), 'recover', route.reverseId, '--json'], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', timeout: 8000 });
+        assert.equal(rejected.status, 4, rejected.stderr); const uncertainty = JSON.parse(rejected.stdout);
+        assert.equal(uncertainty.error.code, 'RETURN_UNCERTAIN'); assert.equal(uncertainty.data.cause.code, 'STREAM_CAPABILITY');
+        assert.match(uncertainty.error.hint, /Install Bauble 0\.2\.0 on both ends/); assert.match(uncertainty.error.hint, /never recapture/);
+        assert.match(uncertainty.error.message, /before operation admission; earlier capture or authority cannot be ruled out/);
+        assert.equal(uncertainty.data.reverseId, route.reverseId); assert.equal(uncertainty.data.originalId, route.originalId);
+        assert.deepEqual(findReturn(f.store, route.reverseId), beforeRoute); assert.deepEqual(f.remote.owner(f.captured.manifest.lineageId), beforeOwner);
+        assert.equal(existsSync(admission), false, 'Incompatible current connection must admit no capture or mutation');
+      }
+      let connections = 0; let closed = 0; const captureIds: string[] = [];
+      const result = await execute(parseCommand(['recover', route.reverseId, '--approval-digest', f.remote.manifest(route.reverseId).digest, '--json']), { connect: () => { connections++; return Object.assign(async (request: Parameters<Rpc>[0]) => { if (request.operation === 'capture') captureIds.push((request.data as { returnId: string }).returnId); return f.rpc(request); }, { close() { closed++; } }); } });
+      assert.equal(connections, 1); assert.equal(closed, 1); assert.ok(captureIds.every(id => id === route.reverseId));
+      assert.ok('sessionFile' in result.data); reg = result.data;
+    } finally {
+      if (previousState === undefined) delete process.env.BAUBLE_STATE; else process.env.BAUBLE_STATE = previousState;
+      if (previousConfig === undefined) delete process.env.BAUBLE_CONFIG; else process.env.BAUBLE_CONFIG = previousConfig;
+    }
     assert.ok(reg && 'sessionFile' in reg); assert.equal(f.store.status(route.reverseId).phase, 'returned');
     assert.equal(f.launches(), 1, 'Return/recovery never starts another runtime');
     assert.equal(readFileSync(join(f.repo, 'newer-local.txt'), 'utf8'), 'do not overwrite newer original edits');
@@ -153,6 +190,16 @@ for (const point of ['capture', 'restoration', 'fence', 'claim', 'registration',
   try {
     const route = beginReturn(f.store, f.captured.manifest.transferId, f.alias, f.destination); let once = true;
     await assert.rejects(resumeReturn(f.store, route, f.rpc, approve(f.store), reached => { if (reached === point && once) { once = false; throw new Error(`crash after ${point}`); } }), /crash after/);
+    if (point === 'capture') {
+      const beforeRoute = findReturn(f.store, route.reverseId); const beforeOwner = f.remote.owner(f.captured.manifest.lineageId); const calls: string[] = [];
+      const incompatible: Rpc = async request => { calls.push(request.operation); throw new CliError('STREAM_CAPABILITY', 'Incompatible helper', 'capability', 'Install Bauble 0.2.0 on both ends. No downgrade or replay.'); };
+      await assert.rejects(resumeReturn(f.store, route, incompatible, approve(f.store)), (error: unknown) => {
+        assert.ok(error instanceof CliError); assert.equal(error.code, 'RETURN_UNCERTAIN'); assert.equal(error.exitCode, 4);
+        const data = error.data as { originalId: string; reverseId: string; cause: { code: string } };
+        assert.equal(data.originalId, route.originalId); assert.equal(data.reverseId, route.reverseId); assert.equal(data.cause.code, 'STREAM_CAPABILITY'); assert.match(error.hint!, /Install Bauble 0\.2\.0 on both ends/); return true;
+      });
+      assert.deepEqual(calls, ['download']); assert.deepEqual(findReturn(f.store, route.reverseId), beforeRoute); assert.deepEqual(f.remote.owner(f.captured.manifest.lineageId), beforeOwner);
+    }
     const completed = await resumeReturn(new Store(f.store.root), route, f.rpc, approve(f.store));
     const nativeBefore = readFileSync(completed.sessionFile); const registrationBefore = f.store.registration(completed.sessionFile);
     const again = await pull(f.captured.manifest.transferId, undefined, f.store, { config: f.config, connect: () => f.rpc });
@@ -227,7 +274,7 @@ test('return recovery retries lost finish acknowledgment separately, with no cap
   try {
     const route = beginReturn(f.store, f.captured.manifest.transferId, f.alias, f.destination);
     const losing: Rpc = async request => { const result = await f.rpc(request); if (request.operation === 'finish') throw new Error('lost finish acknowledgment'); return result; };
-    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), /lost finish/);
+    await assert.rejects(resumeReturn(f.store, route, losing, approve(f.store)), { code: 'RETURN_UNCERTAIN' });
     assert.equal(f.store.status(route.reverseId).phase, 'returned');
     const calls: string[] = []; const retry: Rpc = request => { calls.push(request.operation); return f.rpc(request); };
     await recover(route.reverseId, false, f.store, { config: f.config, connect: () => retry });

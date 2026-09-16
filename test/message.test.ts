@@ -1,7 +1,9 @@
+import { readLog } from '../src/log.js';
+import { streamRpc } from '../src/stream.js';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, fork, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -292,9 +294,9 @@ test('message CLI: explicit request-ID status, literal argv and local state rout
     let stdout = ''; let stderr = ''; child.on('error', fail); child.stdout.on('data', chunk => { stdout += chunk; }); child.stderr.on('data', chunk => { stderr += chunk; }); child.on('exit', code => ok({ code, stdout, stderr }));
   });
   const requestId = randomUUID(); const text = '-literal $(touch NEVER)\n/bauble';
-  const sent = await cli(['message', f.id, '--request-id', requestId, '--', text]); assert.equal(sent.code, 0, sent.stderr); assert.equal(JSON.parse(sent.stdout).state, 'accepted'); assert.ok(!sent.stderr.includes(text));
-  await settled(f); const status = await cli(['message-status', f.id, '--request-id', requestId]); assert.equal(status.code, 0); assert.equal(JSON.parse(status.stdout).requestId, requestId);
-  assert.equal((await cli(['message-status', f.id])).code, 1); assert.equal((await cli(['message', f.id, 'a', 'b'])).code, 1);
+  const sent = await cli(['message', f.id, '--json', '--request-id', requestId, '--', text]); assert.equal(sent.code, 0, sent.stderr); assert.equal(JSON.parse(sent.stdout).data.state, 'accepted'); assert.ok(!sent.stderr.includes(text)); assert.ok(sent.stderr.includes(requestId));
+  await settled(f); const status = await cli(['message-status', f.id, '--json', '--request-id', requestId]); assert.equal(status.code, 0); assert.equal(JSON.parse(status.stdout).data.requestId, requestId);
+  assert.equal((await cli(['message-status', f.id])).code, 2); assert.equal((await cli(['message', f.id, 'a', 'b'])).code, 2);
   assert.equal(userTexts(f).filter(t => t === text).length, 1);
 });
 
@@ -369,4 +371,32 @@ test('message: actual lost socket ACK and client crash before dispatch reconcile
   await f.managed.close();
   assert.equal((await messageStatus(f.id, item.requestId, f.remote, { config: f.config })).state, 'accepted');
   assert.deepEqual(readFileSync(join(f.remote.root, 'message-inbox', item.requestId + '.json')), bytes);
+});
+
+
+test('message stream: one helper for preflight/delivery; lost channel cannot cancel admitted native preflight', async t => {
+  const f = await pair(t); const configPath = join(f.root, 'stream-config.json'); writeFileSync(configPath, JSON.stringify(f.config));
+  const entered = deferred(); const release = deferred(); const emit = f.managed.runtime.session.extensionRunner.emitInput.bind(f.managed.runtime.session.extensionRunner);
+  f.managed.runtime.session.extensionRunner.emitInput = async (...args) => { entered.resolve(); await release.promise; return emit(...args); };
+  let helpers = 0; const rpc = streamRpc(() => { helpers++; return spawn(process.execPath, [resolve('dist/src/cli.js'), '_helper-stream'], { env: { ...process.env, BAUBLE_CONFIG: configPath }, stdio: ['pipe', 'pipe', 'pipe'] }); });
+  const requestId = randomUUID(); let intent = '';
+  try {
+    const sending = messageSession(f.id, 'stream disconnected literal', requestId, f.source, { config: f.config, connect: () => rpc, onIntent: id => { intent = id; } });
+    await entered.promise; assert.equal(intent, requestId); rpc.close();
+    assert.equal((await sending).state, 'uncertain'); release.resolve(); await settled(f);
+    assert.equal((await messageStatus(f.id, requestId, f.remote, { config: f.config })).state, 'accepted');
+    assert.equal(userTexts(f).filter(text => text === 'stream disconnected literal').length, 1); assert.equal(helpers, 1); assert.equal(f.launches(), 1);
+  } finally { release.resolve(); rpc.close(); }
+});
+
+
+test('hostRuntime log producer: appends preserve cursor identity, emit only new bytes and retain message redaction', async t => {
+  const f = await pair(t); const path = join(f.remote.transfer(f.id), 'run.log');
+  await messageSession(f.id, 'first secret message marker', randomUUID(), f.source, f.options); await settled(f);
+  const first = readLog(path); const prefix = readFileSync(path); assert.ok(first.text.includes('contentOmitted')); assert.ok(!first.text.includes('first secret message marker'));
+  await messageSession(f.id, 'second secret message marker', randomUUID(), f.source, f.options); await settled(f);
+  const next = readLog(path, first.cursor!); const all = readFileSync(path);
+  assert.equal(next.cursor!.identity, first.cursor!.identity); assert.equal(next.reset, false); assert.ok(next.text.length > 0);
+  assert.deepEqual(all.subarray(0, prefix.length), prefix); assert.equal(next.text, all.subarray(prefix.length).toString('utf8')); assert.ok(next.text.includes('contentOmitted'));
+  assert.ok(!all.toString().includes('first secret message marker')); assert.ok(!all.toString().includes('second secret message marker')); assert.equal(readLog(path, next.cursor!).text, '');
 });
